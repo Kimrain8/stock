@@ -1,0 +1,7 @@
+38个有疑问：到底是 成交额竞 合适 成交额
+59：成交额固，两融余额 
+60：成交量固，现手
+
+          
+https://webapi.cninfo.com.cn/api/stock/p_public0004?platetype=137002&platecode=D&@orderby=SECCODE:asc&@column=SECCODE,SECNAME
+https://webapi.cninfo.com.cn/api/stock/p_public0004?platetype=137002&platecode=D44&@orderby=SECCODE:asc&@column=SECCODE,SECNAME

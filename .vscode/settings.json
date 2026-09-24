@@ -1,0 +1,18 @@
+{
+    "chat.agent.maxRequests": 10,
+    "chat.agent.enabled": false,
+    "chat.checkpoints.enabled": false,
+    "accessibility.signals.chatUserActionRequired": {
+        "sound": "off",
+        "announcement": "off"
+    },
+    "accessibility.signals.chatResponseReceived": {
+        "sound": "off"
+    },
+    "chat.undoRequests.restoreInput": false,
+    "chat.agent.sandbox.allowAutoApprove": false,
+    "chat.agent.sandbox.allowUnsandboxedCommands": false,
+    "chat.agent.sandbox.retryWithAllowNetworkRequests": false,
+    "chat.agent.codeBlockProgress": false,
+    "chat.agent.thinking.collapsedTools": "off"
+}

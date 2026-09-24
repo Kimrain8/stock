@@ -1,0 +1,277 @@
+
+UID                 PID                 PPID                C                   STIME               TTY                 TIME                CMD
+root                2361                2259                0                   06:59               ?                   00:02:12            python3 /app/tools/collect/run.py schedule
+
+run.py 文件：
+# -*- coding: utf-8 -*-
+"""采集器入口：
+  python run.py <task> [--date 20260907] [--limit 100]   手动执行单个/多个任务
+  python run.py all [--date ...]                         执行日常任务集（配置里的 tasks）
+  python run.py schedule                                 常驻调度（默认收盘后/周任务）
+"""
+import argparse
+import datetime as dt
+import json
+import logging
+import os
+import sys
+import threading
+import time
+
+# 以脚本方式运行时自举：把 tools/ 加入 path，按包导入
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from collect import common, qq, ts_tasks  # noqa: E402
+from collect.common import CFG, today_iso, ymd_to_dash  # noqa: E402
+
+log = logging.getLogger("collect")
+
+# 运行记录文件（tools 目录为 bind-mount，dashboard 与 collector 共用同一份）
+STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
+_STATE_LOCK = threading.Lock()
+
+TASKS = {
+    "qq_qt": qq.collect_qq_qt,
+    "qq_hsj": qq.collect_qq_hsj,
+    "qq_hy_hsj": qq.collect_qq_hy_hsj,
+    "qq_hy_detail": qq.collect_qq_hy_detail,
+    "ts_stock_basic": ts_tasks.collect_ts_stock_basic,
+    # ts_daily 与 ts_trade_cal 仅为别名（避免与表名混淆）
+    "ts_trade_cal": ts_tasks.collect_ts_trade_cal,
+    "ts_trading_dates": ts_tasks.collect_ts_trade_cal,
+    "ts_stock_daily_his": ts_tasks.collect_ts_daily,
+    "ts_daily": ts_tasks.collect_ts_daily,
+    "ts_dividend": ts_tasks.collect_ts_dividend,
+}
+
+# "all" = 配置文件 schedule.tasks（qq_qt 等），另可用 schedule 常驻
+DAILY = CFG["schedule"].get("tasks") or ["qq_hy_hsj", "qq_hsj", "qq_hy_detail",
+                                          "qq_qt", "ts_stock_daily_his", "ts_trade_cal"]
+
+
+def setup_logging():
+    level = getattr(logging, str(CFG["logging"].get("level", "INFO")).upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+def run_task(name, date=None, limit=None, **kw):
+    """执行单个任务，返回结果字典（含新增/更新行数统计）。"""
+    fn = TASKS[name]
+    if date:
+        kw["trade_date"] = ymd_to_dash(date)
+    if limit and name == "qq_qt":
+        kw["limit"] = limit
+    t0 = time.time()
+    log.info("==> 开始任务 %s", name)
+    before = common.snapshot_stats()
+    try:
+        n = fn(**kw)
+        delta = common.stats_delta(before)
+        ins = sum(v[0] for v in delta.values())
+        upd = sum(v[1] for v in delta.values())
+        log.info("<== 任务 %s 结束，用时 %.1fs，新增 %s 行 / 更新 %s 行", name, time.time() - t0, ins, upd)
+        return {"name": name, "status": "ok", "n": n, "inserted": ins, "updated": upd, "tables": delta}
+    except Exception as e:  # noqa: BLE001
+        log.error("任务 %s 失败: %s: %s", name, type(e).__name__, e)
+        return {"name": name, "status": "error", "n": 0, "inserted": 0, "updated": 0,
+                "error": f"{type(e).__name__}: {e}", "tables": {}}
+
+
+# ---------------------------------------------------------------- 运行记录
+def load_state():
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def save_run(trigger: str, date: str, items: list):
+    """保存一次采集运行记录（含每任务新增/更新行数）。"""
+    rec = {
+        "time": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "trigger": trigger,
+        "date": date,
+        "items": [{"name": it.get("name"), "status": it.get("status"),
+                   "inserted": it.get("inserted", 0), "updated": it.get("updated", 0),
+                   "error": it.get("error")} for it in items],
+    }
+    with _STATE_LOCK:
+        runs = load_state()
+        runs.append(rec)
+        state = runs[-30:]
+        try:
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=1)
+        except Exception as e:  # noqa: BLE001
+            log.warning("state.json 写入失败: %s", e)
+    return rec
+
+
+def run_group(tasks, date=None, limit=None, trigger="手动", timeout=0):
+    """顺序执行一组任务并保存运行记录，返回结果列表。"""
+    items = []
+    deadline = time.time() + timeout if timeout else None
+    for name in tasks:
+        res = run_task(name, date=date, limit=limit)
+        items.append(res)
+        if deadline and time.time() > deadline:
+            log.info("达到 timeout，退出")
+            break
+    if items:
+        save_run(trigger, ymd_to_dash(date or today_iso()), items)
+    return items
+
+
+# ---------------------------------------------------------------- 调度
+def _hm(s):
+    h, m = s.split(":")
+    return int(h), int(m)
+
+
+def is_trade_day(d=None):
+    d = d or dt.date.today()
+    try:
+        rows = common.query(
+            "SELECT is_open FROM ts_trading_dates WHERE exchange='SSE' AND trade_date=%s", (d,))
+        if rows:
+            return rows[0]["is_open"] == "1"
+    except Exception:  # noqa: BLE001
+        pass
+    return d.weekday() < 5  # 表不可用时的兜底
+
+
+def _due_groups(day, now, conf, ran):
+    """返回该日已到点的 (触发名, 任务列表)。"""
+    sc = CFG["schedule"]
+    groups = [("daily", sc["daily_time"], sc.get("tasks") or DAILY)]
+    for wt in sc.get("weekly_tasks") or []:
+        groups.append((f"weekday{wt['weekday']}", wt.get("time", "06:10"), wt.get("tasks") or []))
+    out = []
+    for gname, tstr, tasks in groups:
+        key = f"{day}:{gname}"
+        if key in ran or not tasks:
+            continue
+        is_week = gname.startswith("weekday") and day.weekday() == int(gname[7:])
+        is_daily = gname == "daily"
+        if (is_daily or is_week) and (now.hour, now.minute) >= _hm(tstr):
+            label = "自动收盘15:30" if is_daily else f"自动周任务weekday{int(gname[7:])}"
+            out.append((label, tasks))
+            ran.add(key)
+    return out
+
+
+def schedule_loop():
+    log.info("调度器启动：时区=%s，日任务 %s，周任务=%s",
+             CFG["schedule"]["timezone"], CFG["schedule"]["daily_time"],
+             CFG["schedule"].get("weekly_tasks"))
+    ran = set()
+    while True:
+        now = dt.datetime.now()
+        if is_trade_day(now.date()):
+            for label, tasks in _due_groups(now.date(), now, CFG, ran):
+                log.info(">>> 到点触发: %s", label)
+                run_group(tasks, trigger=label)
+        # 新的一天清空执行标记
+        if ran:
+            ran = {k for k in ran if k.startswith(now.date().strftime("%Y-%m-%d"))}
+        time.sleep(20)
+
+
+def main():
+    setup_logging()
+    ap = argparse.ArgumentParser(description="本地数据采集器")
+    ap.add_argument("task", nargs="?", help="任务名 / all / schedule / list")
+    ap.add_argument("--date", help="交易日 YYYYMMDD（默认今天）")
+    ap.add_argument("--limit", help="qq_qt 最多抓取股票数（调试用）")
+    ap.add_argument("--timeout", type=int, default=0, help="调试用：自动退出秒数")
+    args = ap.parse_args()
+
+    if args.task in (None, "list"):
+        print("可用任务:")
+        for k, f in TASKS.items():
+            print(f"  {k:<14} {f.__doc__ or ''}")
+        print("  all       执行日常任务集(配置 schedule.tasks)")
+        print("  schedule  常驻定时（每交易日收盘后 + 周任务）")
+        return
+
+    if args.task == "schedule":
+        schedule_loop()
+        return
+
+    names = DAILY if args.task == "all" else [t.strip() for t in args.task.split(",") if t.strip()]
+    unknown = [n for n in names if n not in TASKS]
+    if unknown:
+        sys.exit(f"未知任务: {unknown}")
+    run_group(names, date=args.date, limit=args.limit, trigger="手动",
+              timeout=args.timeout or 0)
+
+
+if __name__ == "__main__":
+    main()
+
+
+# ls -la /app/tools/collect/
+total 84
+drwxrwxr-x 3 1000 1000  4096 Sep  8 22:34 .
+drwxrwxr-x 5 1000 1000  4096 Sep  8 20:52 ..
+-rw------- 1 1000 1000  8093 Sep  7 17:55 MAINTENANCE.md
+-rw------- 1 1000 1000  3102 Sep  7 17:38 README.md
+-rw------- 1 1000 1000   847 Sep  7 17:02 __init__.py
+drwxrwxr-x 2 1000 1000  4096 Sep  8 20:52 __pycache__
+-rw------- 1 1000 1000  2068 Sep  7 20:07 collect.yaml
+-rw------- 1 1000 1000  9122 Sep  8 20:51 common.py
+-rw------- 1 1000 1000 12764 Sep  7 17:25 qq.py
+-rw------- 1 1000 1000   852 Sep  7 17:25 qq_sign.py
+-rw------- 1 1000 1000  8027 Sep  8 20:51 run.py
+-rw-r--r-- 1 root root  1500 Sep  8 20:56 state.json
+-rw------- 1 1000 1000  7881 Sep  7 17:25 ts_tasks.py
+
+
+env:
+# env
+HOSTNAME=3c1d84c4810e
+HOME=/root
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+PYTHONUNBUFFERED=1
+GPG_KEY=A035xxxx
+DEEPSEEK_API_KEY=sk-6xxx4
+PYTHON_SHA256=91bcdebfdde239a003ae93738a7fce0f9230fee5c4bc2b86f6e6e8c6f98aabe8
+OPENBB_API_BASE=http://127.0.0.1:8000
+PYTHONDONTWRITEBYTECODE=1
+PIP_DISABLE_PIP_VERSION_CHECK=1
+TERM=xterm
+MYSQL_PASSWORD=Kim9
+PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MYSQL_HOST=172.18.0.1
+MYSQL_USER=root
+TUSHARE_TOKEN=3448xxxxxx
+LANG=C.UTF-8
+DEEPSEEK_MODEL=deepseek-v4-flash
+PYTHON_VERSION=3.11.16
+MYSQL_PORT=3306
+PWD=/app
+MYSQL_DB=jhd
+TZ=Asia/Shanghai
+
+kim@kim-Inspiron-N5110:~$ docker inspect openbb-collector | grep -A 10 "Cmd"
+            "Cmd": [
+                "python3",
+                "/app/tools/collect/run.py",
+                "schedule"
+            ],
+            "Healthcheck": {
+                "Test": [
+                    "CMD",
+                    "python3",
+                    "-c",
+                    "import sys; sys.exit(0)"
+
+
+这个docker应该需要依赖于python，但是python到底在哪里。
+怎么查看对外暴露的port，是否包含了docker的port

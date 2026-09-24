@@ -1,0 +1,91 @@
+{
+  "instances": {
+    "ts": {
+      "class": "crawl_stock:Myts",
+      "args": {},
+      "lifetime": "batch"
+    },
+    "qq": {
+      "class": "crawl_stock:Myqq",
+      "args": {},
+      "lifetime": "batch"
+    }
+  },
+
+  "tasks": [
+	{
+      "name": "get_trade_calendar",
+      "func": "ts:get_trade_calendar",
+      "interval": "D_1",
+      "start_at": "2026-09-23 18:00:00",
+      "validate": 1,
+	  "deps": [],
+      "params": {}
+    },
+	{
+      "name": "get_stock_list",
+      "func": "ts:get_stock_list",
+      "interval": 0,
+      "start_at": null,
+      "validate": 1,
+	  "deps": ["get_trade_calendar"],
+      "params": {}
+    },
+	{
+      "name": "get_daily_deal",
+      "func": "ts:get_daily_deal",
+      "interval": 0,
+      "start_at": null,
+      "validate": 1,
+	  "deps": ["get_stock_list"],
+      "params": {}
+    },
+	{
+      "name": "fetch_getBoardRankList_db",
+      "func": "qq:fetch_getBoardRankList_db",
+      "interval": 0,
+      "start_at": null,
+      "validate": 1,
+	  "deps": ["get_daily_deal"],
+      "params": {}
+    },
+	{
+      "name": "fetch_getRank_db",
+      "func": "qq:fetch_getRank_db",
+      "interval": 0,
+      "start_at": null,
+      "validate": 1,
+	  "deps": ["fetch_getBoardRankList_db"],
+      "params": {}
+    },
+	{
+      "name": "fetch_batch_plate_db",
+      "func": "qq:fetch_batch_plate_db",
+      "interval": 0,
+      "start_at": null,
+      "validate": 1,
+	  "retry": 3,
+	  "retry_backoff": [2, 3, 5],
+	  "deps": ["fetch_getRank_db"],
+      "params": {}
+    },
+	{
+      "name": "fetch_quotes_db",
+      "func": "qq:fetch_quotes_db",
+      "interval": 0,
+      "start_at": null,
+      "validate": 1,
+	  "deps": ["fetch_batch_plate_db"],
+      "params": {}
+    },
+	{
+      "name": "fetch_quotes_db_5min",
+      "func": "qq:fetch_quotes_db",
+      "interval": "mm_5",
+      "start_at": "17:35:00",
+      "validate": 0,
+	  "deps": [],
+      "params": {"codes": ["sz002074"], "tbl": "qq_qt_detail_tmp"}
+    }
+  ]
+}

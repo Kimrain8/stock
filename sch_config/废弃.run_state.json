@@ -1,0 +1,42 @@
+{
+  "day": "2026-09-22",
+  "runs": 1,
+  "steps": {
+    "Myts.get_trade_calendar": {
+      "status": "done",
+      "date": "2026-09-22",
+      "at": "2026-09-22T17:36:20"
+    },
+    "Myts.get_stock_list": {
+      "status": "done",
+      "date": "2026-09-22",
+      "at": "2026-09-22T17:36:21"
+    },
+    "Myts.get_daily_deal": {
+      "status": "done",
+      "date": "2026-09-22",
+      "at": "2026-09-22T17:36:22"
+    },
+    "Myqq.fetch_getBoardRankList_db": {
+      "status": "done",
+      "date": "2026-09-22",
+      "at": "2026-09-22T17:36:30"
+    },
+    "Myqq.fetch_getRank_db": {
+      "status": "done",
+      "date": "2026-09-22",
+      "at": "2026-09-22T17:36:31"
+    },
+    "Myqq.fetch_batch_plate_db": {
+      "status": "done",
+      "date": "2026-09-22",
+      "at": "2026-09-22T17:36:52"
+    },
+    "Myqq.fetch_quotes_db": {
+      "status": "done",
+      "date": "2026-09-22",
+      "at": "2026-09-22T17:36:58"
+    }
+  },
+  "last_error": null
+}

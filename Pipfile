@@ -1,0 +1,29 @@
+[[source]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+numpy = "*"
+pandas = "*"
+requests = "*"
+beautifulsoup4 = "*"
+lxml = "*"
+selenium = "*"
+playwright = "*"
+scrapy = "*"
+aiohttp = "*"
+httpx = "*"
+fake-useragent = "*"
+crawl4ai = {extras = ["all"], version = "*"}
+tushare = "*"
+akshare = "*"
+akquant = "*"
+schedule = "*"
+mysql-connector-python = "*"
+mplfinance = "*"
+
+[dev-packages]
+
+[requires]
+python_version = "3.11"

@@ -1,0 +1,64 @@
+2026-09-24 10:13:12,043 [INFO] [fetch_quotes_db_5min] 新增 validate=1 interval=mm_5 retry=0 next=2026-09-24 10:15:00
+2026-09-24 10:13:12,054 [INFO] 调度线程启动
+2026-09-24 10:15:02,065 [INFO] 创建 batch 实例 [qq] = crawl_stock:Myqq
+2026-09-24 10:15:02,065 [INFO] [fetch_quotes_db_5min] 开始执行 func=qq:fetch_quotes_db params={'codes': ['sz002074'], 'tbl': 'qq_qt_detail_tmp'} (第 1/1 次)
+2026-09-24 10:15:02,308 [INFO] [fetch_quotes_db_5min] 执行成功
+2026-09-24 10:15:02,312 [INFO] 释放 batch 实例 [qq]
+2026-09-24 10:20:00,003 [INFO] 创建 batch 实例 [qq] = crawl_stock:Myqq
+2026-09-24 10:20:00,003 [INFO] [fetch_quotes_db_5min] 开始执行 func=qq:fetch_quotes_db params={'codes': ['sz002074'], 'tbl': 'qq_qt_detail_tmp'} (第 1/1 次)
+2026-09-24 10:20:00,301 [INFO] [fetch_quotes_db_5min] 执行成功
+2026-09-24 10:20:00,301 [INFO] 释放 batch 实例 [qq]
+2026-09-24 10:23:26,558 [INFO] 调度线程退出
+2026-09-24 10:23:26,558 [INFO] 调度器已停止
+2026-09-24 11:23:27,954 [INFO] [fetch_quotes_db_5min] 新增 validate=1 interval=mm_5 retry=0 next=2026-09-24 11:25:00
+2026-09-24 11:23:27,954 [INFO] 调度线程启动
+2026-09-24 11:25:02,043 [INFO] 创建 batch 实例 [qq] = crawl_stock:Myqq
+2026-09-24 11:25:02,043 [INFO] [fetch_quotes_db_5min] 开始执行 func=qq:fetch_quotes_db params={'codes': ['sz002074'], 'tbl': 'qq_qt_detail_tmp'} (第 1/1 次)
+2026-09-24 11:25:02,255 [INFO] [fetch_quotes_db_5min] 执行成功
+2026-09-24 11:25:02,255 [INFO] 释放 batch 实例 [qq]
+2026-09-24 11:25:27,054 [INFO] 创建 batch 实例 [qq] = crawl_stock:Myqq
+2026-09-24 11:25:27,054 [INFO] [fetch_quotes_db_5min] 开始执行 func=qq:fetch_quotes_db params={'codes': ['sz002074'], 'tbl': 'qq_qt_detail_tmp'} (第 1/1 次)
+2026-09-24 11:25:27,209 [INFO] [fetch_quotes_db_5min] 执行成功
+2026-09-24 11:26:28,357 [INFO] 创建 batch 实例 [qq] = crawl_stock:Myqq
+2026-09-24 11:26:28,357 [INFO] [fetch_quotes_db_5min] 开始执行 func=qq:fetch_quotes_db params={'codes': ['sz002074'], 'tbl': 'qq_qt_detail_tmp'} (第 1/1 次)
+2026-09-24 11:26:28,632 [INFO] [fetch_quotes_db_5min] 执行成功
+2026-09-24 11:30:00,008 [INFO] 创建 batch 实例 [qq] = crawl_stock:Myqq
+2026-09-24 11:30:00,009 [INFO] [fetch_quotes_db_5min] 开始执行 func=qq:fetch_quotes_db params={'codes': ['sz002074'], 'tbl': 'qq_qt_detail_tmp'} (第 1/1 次)
+2026-09-24 11:30:00,276 [INFO] [fetch_quotes_db_5min] 执行成功
+2026-09-24 11:30:00,276 [INFO] 释放 batch 实例 [qq]
+2026-09-24 11:34:57,503 [INFO] 调度线程退出
+2026-09-24 11:34:57,503 [INFO] 调度器已停止
+2026-09-24 11:44:04,966 [INFO] [fetch_quotes_db_5min] 新增 validate=1 interval=mm_5 retry=0 next=2026-09-24 11:45:00
+2026-09-24 11:44:04,966 [INFO] 调度线程启动
+2026-09-24 11:44:49,837 [INFO] [fetch_quotes_db_5min] start_at 更新 next=2026-09-24 17:35:00 
+2026-09-24 11:45:42,924 [INFO] [fetch_quotes_db_5min] start_at 更新 next=2026-09-24 17:35:00 
+2026-09-24 11:46:37,453 [INFO] [fetch_quotes_db_5min] start_at 更新 next=2026-09-25 00:00:00 
+2026-09-24 11:47:38,662 [INFO] [fetch_quotes_db_5min] start_at 更新 next=2026-09-24 11:50:00 
+2026-09-24 11:48:51,463 [INFO] [fetch_quotes_db_5min] 暂停
+2026-09-24 11:49:26,601 [INFO] [fetch_quotes_db_5min] 启用
+2026-09-24 11:50:02,044 [INFO] 创建 batch 实例 [qq] = crawl_stock:Myqq
+2026-09-24 11:50:02,044 [INFO] [fetch_quotes_db_5min] 开始执行 func=qq:fetch_quotes_db params={'codes': ['sz002074'], 'tbl': 'qq_qt_detail_tmp'} (第 1/1 次)
+2026-09-24 11:50:02,252 [INFO] [fetch_quotes_db_5min] 执行成功
+2026-09-24 11:50:02,252 [INFO] 释放 batch 实例 [qq]
+2026-09-24 11:53:43,296 [INFO] 调度线程退出
+2026-09-24 11:53:43,296 [INFO] 调度器已停止
+2026-09-24 12:21:19,977 [INFO] [fetch_quotes_db_5min] 新增 validate=1 interval=mm_5 retry=0 next=2026-09-24 12:25:00
+2026-09-24 12:21:19,977 [INFO] 调度线程启动
+2026-09-24 12:25:02,053 [INFO] 创建 batch 实例 [qq] = crawl_stock:Myqq
+2026-09-24 12:25:02,053 [INFO] [fetch_quotes_db_5min] 开始执行 func=qq:fetch_quotes_db params={'codes': ['sz002074'], 'tbl': 'qq_qt_detail_tmp'} (第 1/1 次)
+2026-09-24 12:25:02,266 [INFO] [fetch_quotes_db_5min] 执行成功
+2026-09-24 12:25:02,268 [INFO] 释放 batch 实例 [qq]
+2026-09-24 12:30:00,008 [INFO] 创建 batch 实例 [qq] = crawl_stock:Myqq
+2026-09-24 12:30:00,008 [INFO] [fetch_quotes_db_5min] 开始执行 func=qq:fetch_quotes_db params={'codes': ['sz002074'], 'tbl': 'qq_qt_detail_tmp'} (第 1/1 次)
+2026-09-24 12:30:00,279 [INFO] [fetch_quotes_db_5min] 执行成功
+2026-09-24 12:30:00,284 [INFO] 释放 batch 实例 [qq]
+2026-09-24 12:33:45,194 [INFO] 调度线程退出
+2026-09-24 12:33:45,194 [INFO] 调度器已停止
+2026-09-24 12:43:22,552 [INFO] [fetch_quotes_db_5min] 新增 validate=1 interval=mm_5 retry=0 next=2026-09-24 12:45:00
+2026-09-24 12:43:22,552 [INFO] 调度线程启动
+2026-09-24 12:45:01,983 [INFO] 创建 batch 实例 [qq] = crawl_stock:Myqq
+2026-09-24 12:45:01,983 [INFO] [fetch_quotes_db_5min] 开始执行 func=qq:fetch_quotes_db params={'codes': ['sz002074'], 'tbl': 'qq_qt_detail_tmp'} (第 1/1 次)
+2026-09-24 12:45:02,276 [INFO] [fetch_quotes_db_5min] 执行成功
+2026-09-24 12:45:02,276 [INFO] 释放 batch 实例 [qq]
+2026-09-24 12:45:33,045 [INFO] 调度线程退出
+2026-09-24 12:45:33,045 [INFO] 调度器已停止

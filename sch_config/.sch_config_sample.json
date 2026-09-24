@@ -1,0 +1,244 @@
+{
+  "notify": {
+	"on_success": "tasks:notify_success",
+	"on_fail":    "tasks:notify_fail",
+	"on_recover": "tasks:notify_recover",
+	"on_retry":   "tasks:notify_retry",
+	"on_skip":    "tasks:notify_skip"
+    "on_success": null
+  },
+  "instances": {
+    "ts_batch": {
+      "class": "module:ClassName",
+      "args": {"token": "abc-batch"},
+      "lifetime": "call | batch | permanent"
+    },
+    "ts_perm": {
+      "class": "tasks:Tushare",
+      "args": {"token": "abc-perm"},
+      "lifetime": "permanent"
+    },
+    "ts_call": {
+      "class": "tasks:Tushare",
+      "args": {"token": "abc-call"},
+      "lifetime": "call"
+    }
+  },
+  "tasks": [
+    {
+      "name": "batch_task_a",
+      "func": "module:function | instance:method | module:Class.static_method",
+      "interval": "ss_5 | mm_2 | hh_1 | D_10 | M_2 | Y_1 | M_-1 | Y_-1 | 0 | \"\" | null",
+      "start_at": "null | 0 | 1 | \"08:30\" | \"2025-06-01 08:30:00\"",
+      "validate": 1,
+	  "timeout": 30,
+	  "retry": 3,
+	  "retry_backoff": [1, 3, 5],
+	  "deps": [["a","b"], "c"],
+      "params": { "key": "value" }
+    },
+    {
+      "name": "batch_task_b",
+      "func": "ts_batch:fetch_daily",
+      "interval": "ss_5",
+      "start_at": 1,
+      "validate": 1,
+      "params": {"code": "600000.SH"}
+    },
+    {
+      "name": "perm_task",
+      "func": "ts_perm:fetch_daily",
+      "interval": "ss_8",
+      "start_at": 2,
+      "validate": 1,
+      "params": {"code": "000300.SH"}
+    },
+    {
+      "name": "call_task",
+      "func": "ts_call:fetch_daily",
+      "interval": "ss_6",
+      "start_at": 3,
+      "validate": 1,
+      "params": {"code": "000905.SH"}
+    }
+  ]
+}
+#场景 1：基础 + start_at 三种写法
+{
+  "tasks": [
+    {
+      "name": "a_null",
+      "func": "tasks:hello",
+      "interval": null,
+      "start_at": null,
+      "validate": 1,
+      "params": {"msg": "start_at=null 立即执行一次"}
+    },
+    {
+      "name": "b_zero",
+      "func": "tasks:hello",
+      "interval": null,
+      "start_at": 0,
+      "validate": 1,
+      "params": {"msg": "start_at=0 立即执行一次"}
+    },
+    {
+      "name": "c_delay",
+      "func": "tasks:hello",
+      "interval": null,
+      "start_at": 1,
+      "validate": 1,
+      "params": {"msg": "start_at=1 秒后执行一次"}
+    }
+  ]
+}
+
+# 场景 2：retry 立刻重试
+{
+  "tasks": [
+    {
+      "name": "flaky",
+      "func": "tasks:flaky_job",
+      "interval": "ss_10",
+      "start_at": 0,
+      "retry": 3,
+	  
+      "validate": 1,
+      "params": {"fail_times": 2, "tag": "前两次失败"}
+    }
+  ]
+}
+
+# 场景 3：retry 用尽 → 依赖链跳过
+{
+  "tasks": [
+    {
+      "name": "always_fail",
+      "func": "tasks:fail_job",
+      "interval": "ss_8",
+      "start_at": 0,
+      "retry": 2,
+      "validate": 1,
+      "params": {"tag": "永不成功"}
+    },
+    {
+      "name": "downstream1",
+      "func": "tasks:ok_job",
+      "interval": "ss_8",
+      "start_at": 1,
+      "validate": 1,
+      "deps": ["always_fail"],
+      "params": {"tag": "下游1"}
+    },
+    {
+      "name": "downstream2",
+      "func": "tasks:ok_job",
+      "interval": "ss_8",
+      "start_at": 2,
+      "validate": 1,
+      "deps": ["downstream1"],
+      "params": {"tag": "下游2"}
+    }
+  ]
+}
+
+#场景 4：continue 续跑（核心演示）
+{
+  "tasks": [
+    {
+      "name": "stepA",
+      "func": "tasks:ok_job",
+      "interval": "ss_5",
+      "start_at": 0,
+      "validate": 1,
+      "params": {"tag": "A"}
+    },
+    {
+      "name": "stepB",
+      "func": "tasks:ok_then_fail",
+      "interval": "ss_5",
+      "start_at": 1,
+      "validate": 1,
+      "deps": ["stepA"],
+      "retry": 0
+    },
+    {
+      "name": "stepC",
+      "func": "tasks:ok_job",
+      "interval": "ss_5",
+      "start_at": 2,
+      "validate": 1,
+      "deps": ["stepB"],
+      "params": {"tag": "C"}
+    },
+    {
+      "name": "independent",
+      "func": "tasks:hello",
+      "interval": "ss_5",
+      "start_at": 3,
+      "validate": 1,
+      "params": {"msg": "不在依赖链上的独立任务"}
+    }
+  ]
+}
+
+#场景 5：多依赖分组 + 事件驱动 + retry + 实例池（综合）
+{
+  "instances": {
+    "ts": {
+      "class": "tasks:Tushare",
+      "args": {"token": "abc"},
+      "lifetime": "batch"
+    }
+  },
+  "tasks": [
+    {
+      "name": "fetch1",
+      "func": "ts:fetch_daily",
+      "interval": "ss_8",
+      "start_at": 0,
+      "retry": 2,
+      "validate": 1,
+      "timeout": 5,
+      "params": {"code": "000001.SZ"}
+    },
+    {
+      "name": "fetch2",
+      "func": "tasks:async_job",
+      "interval": "ss_8",
+      "start_at": 1,
+      "retry": 2,
+      "validate": 1,
+      "timeout": 5,
+      "params": {"tag": "fetch2"}
+    },
+    {
+      "name": "backup_path",
+      "func": "tasks:ok_job",
+      "interval": "ss_8",
+      "start_at": 2,
+      "validate": 1,
+      "params": {"tag": "backup"}
+    },
+    {
+      "name": "merge",
+      "func": "tasks:ok_job",
+      "interval": "ss_8",
+      "start_at": 3,
+      "validate": 1,
+      "deps": [["fetch1", "fetch2"], "backup_path"],
+      "params": {"tag": "两条路任意一条完成就跑"}
+    },
+    {
+      "name": "report",
+      "func": "tasks:hello",
+      "interval": 0,
+      "start_at": null,
+      "validate": 1,
+      "deps": ["merge"],
+      "params": {"msg": "merge 成功后立即出报表（事件驱动）"}
+    }
+  ]
+}
+
+
