@@ -22,6 +22,7 @@ akquant = "*"
 schedule = "*"
 mysql-connector-python = "*"
 mplfinance = "*"
+panel = "*"
 
 [dev-packages]
 

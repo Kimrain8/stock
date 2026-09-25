@@ -16,7 +16,7 @@ scheduler.py —— 生产级轻量调度器
   - 循环依赖检测 (启动时)
   - 通知钩子 (on_success/on_fail/on_retry/on_recover/on_skip)
   - 状态持久化 (<cfg>.state.json)
-  - 交互命令: status/tasks/run/pause/resume/update/cancel all/help
+  - 交互命令: status/tasks/run/pause/resume/update/cancel/help
 
 用法:
   python scheduler.py <配置文件>
@@ -42,7 +42,7 @@ log = logging.getLogger("scheduler")
 
 _GLOBAL_SCHEDULER: Optional["Scheduler"] = None
 EVENT = "__EVENT__"          # interval 的特殊值: 事件驱动
-_SAVE_MIN_INTERVAL = 1.0     # 状态文件最小写入间隔 (秒)
+#_SAVE_MIN_INTERVAL = 1.0    # 状态文件最小写入间隔 (秒)
 
 
 def get_scheduler() -> "Scheduler":
@@ -228,6 +228,41 @@ def _parse_backoff(raw) -> Optional[Any]:
         return [float(x) for x in raw]
     raise ValueError(f"retry_backoff 非法: {raw!r}")
 
+# =========================================================================== #
+# >>> 改动 1: 新增 condition 字典解析器
+# =========================================================================== #
+def _parse_condition(raw, task_name: str):
+    """
+    解析 condition 字段，返回 (spec, params) 或 (None, {})。
+
+    支持三种输入:
+      - None / 缺省           -> (None, {})
+      - "模块:函数" / "实例:方法"  -> (spec, {})           （兼容字符串简写）
+      - {"func": "...", "params": {...}}
+    """
+    if raw is None:
+        return None, {}
+    if isinstance(raw, str):
+        spec = raw.strip()
+        if not spec:
+            return None, {}
+        if ":" not in spec:
+            raise ValueError(
+                f"[{task_name}] condition 必须形如 '模块:函数' 或 '实例:方法'，"
+                f"收到 {spec!r}")
+        return spec, {}
+    if isinstance(raw, dict):
+        spec = raw.get("func")
+        if not spec:
+            raise ValueError(f"[{task_name}] condition 缺少 'func' 字段: {raw!r}")
+        spec = str(spec).strip()
+        if ":" not in spec:
+            raise ValueError(
+                f"[{task_name}] condition.func 必须形如 '模块:函数' 或 '实例:方法'，"
+                f"收到 {spec!r}")
+        params = dict(raw.get("params") or {})
+        return spec, params
+    raise ValueError(f"[{task_name}] condition 类型非法: {raw!r}")
 
 # =========================================================================== #
 # 类 / 函数加载
@@ -359,6 +394,9 @@ class Task:
     next_run: Optional[datetime]
     params: Dict[str, Any] = field(default_factory=dict)
     deps_groups: List[List[str]] = field(default_factory=list)
+    # >>> 改动 2: 新增 condition 字段
+    condition_spec: Optional[str] = None
+    condition_params: Dict[str, Any] = field(default_factory=dict)
     validate: int = 1
     timeout: Optional[float] = None
     retry: int = 0
@@ -647,8 +685,11 @@ class Scheduler:
                         t = self._tasks[name]
                         nr = (t.next_run.strftime("%Y-%m-%d %H:%M:%S")
                               if t.next_run else "无")
-                        log.info("[%s] 新增 validate=%s interval=%s retry=%d next=%s",
-                                 name, t.validate, t.interval or "(仅一次)", t.retry, nr)
+                        # >>> 改动 3: 日志里带上 condition
+                        log.info("[%s] 新增 validate=%s interval=%s retry=%d "
+                                 "condition=%s next=%s",
+                                 name, t.validate, t.interval or "(仅一次)",
+                                 t.retry, t.condition_spec or "-", nr)
                     except Exception:
                         log.exception("[%s] 创建失败", name)
 
@@ -670,6 +711,8 @@ class Scheduler:
         if retry < 0:
             raise ValueError(f"[{name}] retry 必须 >= 0")
         retry_backoff = _parse_backoff(spec.get("retry_backoff"))
+        # 加入task的前置条件
+        condition_spec, condition_params = _parse_condition(spec.get("condition"), name)
 
         if interval == EVENT:
             next_run = None
@@ -688,6 +731,8 @@ class Scheduler:
             next_run=next_run,
             params=dict(spec.get("params", {})),
             deps_groups=deps_groups,
+            condition_spec=condition_spec,          # >>> 新增
+            condition_params=condition_params,      # >>> 新增
             validate=int(spec.get("validate", 1)),
             timeout=spec.get("timeout"),
             retry=retry,
@@ -712,6 +757,18 @@ class Scheduler:
         if new_deps != t.deps_groups:
             t.deps_groups = new_deps
             log.info("[%s] 依赖更新 %s", t.name, note)
+        # >>> 改动 5: 处理 condition 变更
+        new_cond_spec, new_cond_params = _parse_condition(
+            spec.get("condition"), t.name)
+        if new_cond_spec != t.condition_spec:
+            t.condition_spec = new_cond_spec
+            log.info("[%s] condition 更新为 %s %s",
+                     t.name, new_cond_spec, note)
+        if new_cond_params != t.condition_params:
+            t.condition_params = new_cond_params
+            if new_cond_spec == t.condition_spec and new_cond_params:
+                log.info("[%s] condition.params 更新为 %s %s",
+                         t.name, new_cond_params, note)
 
         new_validate = int(spec.get("validate", 1))
         was = t.validate
@@ -1056,7 +1113,7 @@ class Scheduler:
                     if earliest is None:
                         self._cv.wait() #(timeout=1.0)
                     else:
-                        timeout = max(0.0,(earliest - now).total_seconds()) #(0.05, (earliest - now).total_seconds())
+                        timeout = max(0.0, (earliest - now).total_seconds()) #(0.05, (earliest - now).total_seconds())
                         self._cv.wait(timeout=timeout) #(timeout=min(timeout, 1.0))
                     continue
                 due.sort(key=lambda x: x.next_run)
@@ -1152,10 +1209,19 @@ class Scheduler:
     # ================================================================== #
     # 函数解析
     # ================================================================== #
+    # >>> 改动 6: 抽取通用 _resolve_callable，_resolve_task_func 复用
     def _resolve_task_func(self, task: Task, batch_ctx: Dict[str, Any]):
-        spec = task.func_spec
+        return self._resolve_callable(
+            task.func_spec, batch_ctx, ctx=f"task:{task.name}")
+    def _resolve_callable(self, spec: str, batch_ctx: Dict[str, Any],
+                          ctx: str):
+        """
+        解析 'module:function' / 'instance:method'。
+        返回 (callable, cleanup)。
+        cleanup 不为 None 表示该实例（call lifetime）用完后需 close。
+        """
         if ":" not in spec:
-            raise ValueError(f"[{task.name}] 非法 func: {spec!r}")
+            raise ValueError(f"[{ctx}] 非法引用: {spec!r}")
         prefix, name = spec.split(":", 1)
 
         if self._instances.has(prefix):
@@ -1163,12 +1229,48 @@ class Scheduler:
             inst = self._instances.get(prefix, batch_ctx)
             fn = getattr(inst, name, None)
             if fn is None:
-                raise AttributeError(f"实例 [{prefix}] 没有属性 {name!r}")
+                raise AttributeError(f"[{ctx}] 实例 [{prefix}] 没有属性 {name!r}")
             cleanup = (inst, prefix) if spec_obj.lifetime == "call" else None
             return fn, cleanup
 
         fn = _load_module_attr(spec)
         return fn, None
+    # ================================================================== #
+    # >>> 改动 7: 新增 _check_condition —— 执行 condition 并返回 bool
+    # ================================================================== #
+    def _check_condition(self, task: Task, batch_ctx: Dict[str, Any]) -> bool:
+        """
+        执行 condition。
+          返回 True  = 放行
+          返回 False = 跳过（解析失败 / 执行异常 / 返回值假值）
+        condition 与 func 使用同一套调用约定：fn(**condition_params)
+        """
+        cleanup = None
+        try:
+            try:
+                fn, cleanup = self._resolve_callable(
+                    task.condition_spec, batch_ctx,
+                    ctx=f"task:{task.name}.condition")
+            except Exception:
+                log.exception("[%s] condition 解析失败: %s",
+                              task.name, task.condition_spec)
+                return False
+
+            try:
+                raw = self._execute(task, fn, task.condition_params)
+            except Exception:
+                log.exception("[%s] condition 执行失败: %s",
+                              task.name, task.condition_spec)
+                return False
+
+            return bool(raw)
+        finally:
+            if cleanup is not None:
+                inst, iname = cleanup
+                try:
+                    self._instances.close_one(iname, inst)
+                except Exception:
+                    log.exception("关闭 condition call 实例 [%s] 失败", iname)
 
     # ================================================================== #
     # 执行单个任务
@@ -1180,24 +1282,31 @@ class Scheduler:
         cleanup = None
 
         try:
+            # ---- 1. 依赖检查 ----
             blocked = self._deps_blocked_reason(task)
             if blocked:
                 log.warning("[%s] 跳过执行，依赖未满足: %s", task.name, blocked)
                 return self._finalize(task, "skipped", original_scheduled)
-
+            # >>> 改动 8: condition 检查（依赖通过之后、func 之前）
+            if task.condition_spec:
+                if not self._check_condition(task, batch_ctx):
+                    log.info("[%s] condition 未通过，跳过执行: %s",
+                             task.name, task.condition_spec)
+                    return self._finalize(task, "skipped", original_scheduled)
+            # ---- 2. 解析 func ----
             try:
                 func, cleanup = self._resolve_task_func(task, batch_ctx)
             except Exception as e:
                 log.exception("[%s] 解析 func 失败: %s", task.name, task.func_spec)
                 return self._on_failure(task, e, original_scheduled)
-
+            # ---- 3. 执行 func ----
             attempt = task.retries_done + 1
             total = task.retry + 1
             log.info("[%s] 开始执行 func=%s params=%s (第 %d/%d 次)",
                      task.name, task.func_spec, task.params, attempt, total)
 
             try:
-                self._execute(task, func)
+                self._execute(task, func, task.params)
             except Exception as e:
                 log.exception("[%s] 执行失败", task.name)
                 return self._on_failure(task, e, original_scheduled)
@@ -1277,21 +1386,25 @@ class Scheduler:
         self._save_state()
         return f"final_{status}"
 
-    def _execute(self, task: Task, func: Callable) -> None:
+    # ================================================================== #
+    # >>> 改动 9: _execute 增加 params 参数并返回结果
+    # ================================================================== #
+    def _execute(self, task: Task, func: Callable,
+                 params: Dict[str, Any]) -> Any:
         if inspect.iscoroutinefunction(func):
             loop = self._ensure_async_loop()
-            coro = func(**task.params)
+            coro = func(**params)
             future = asyncio.run_coroutine_threadsafe(coro, loop)
             try:
                 if task.timeout:
-                    future.result(timeout=task.timeout)
-                else:
-                    future.result()
+                    return future.result(timeout=task.timeout)
+					 
+                return future.result()
             except asyncio.TimeoutError:
                 future.cancel()
                 raise TimeoutError(f"异步任务 {task.name} 超时 {task.timeout}s")
         else:
-            func(**task.params)
+            return func(**params)
 
     # ================================================================== #
     # 状态
@@ -1303,6 +1416,9 @@ class Scheduler:
                 name: {
                     "validate": t.validate,
                     "func": t.func_spec,
+                    # >>> 改动 10: 展示 condition
+                    "condition": t.condition_spec,
+                    "condition_params": dict(t.condition_params),
                     "interval": (t.interval if t.interval else
                                  ("事件驱动" if t.interval == EVENT else "(仅一次)")),
                     "retry": t.retry,
@@ -1323,22 +1439,25 @@ class Scheduler:
             }
 
     def print_status(self) -> None:
-        print("-" * 140)
-        print(f"{'任务':<16}{'有效':<5}{'运行':<5}{'状态':<10}{'间隔':<10}"
+        print("-" * 150)
+        print(f"{'任务':<14}{'有效':<5}{'运行':<5}{'状态':<10}{'间隔':<10}"
               f"{'重试':<5}{'下次运行':<21}{'剩余(s)':<10}{'成功':<6}{'失败':<6}"
-              f"{'依赖':<28}参数")
-        print("-" * 140)
+              f"{'condition':<22}{'依赖':<26}参数")
+        print("-" * 150)
         for name, s in self.status().items():
             deps_str = " or ".join("(" + "+".join(g) + ")" for g in s["deps_groups"]) or "-"
-            if len(deps_str) > 26:
-                deps_str = deps_str[:23] + "..."
-            print(f"{name:<16}{s['validate']:<5}"
+            if len(deps_str) > 24:
+                deps_str = deps_str[:21] + "..."
+            cond = s["condition"] or "-"
+            if len(cond) > 20:
+                cond = cond[:17] + "..."
+            print(f"{name:<14}{s['validate']:<5}"
                   f"{'★' if s['running'] else '':<5}"
                   f"{s['last_status']:<10}{s['interval']:<10}"
                   f"{s['retry']:<5}{s['next_run']:<21}"
                   f"{str(s['in_seconds']):<10}{s['ok']:<6}{s['fail']:<6}"
-                  f"{deps_str:<28}{s['params']}")
-        print("-" * 140)
+                  f"{cond:<22}{deps_str:<26}{s['params']}")
+        print("-" * 150)
 
 
 # =========================================================================== #
@@ -1352,7 +1471,7 @@ HELP_TEXT = """
   pause <name>        暂停指定任务（validate=0）
   resume <name>       恢复指定任务（validate=1）
   update              重新加载配置文件
-  cancel all          取消所有任务和调度计划并退出
+  cancel              取消所有任务和调度计划并退出
   help                显示此帮助
   直接回车             无操作
 """.strip()

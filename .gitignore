@@ -5,3 +5,6 @@ tushare_profile/
 outputs/
 akquant-main/
 browsers/
+dashboard/__pycache__/
+.panel/
+*.log
