@@ -8,3 +8,5 @@ browsers/
 dashboard/__pycache__/
 .panel/
 *.log
+*.lock
+*.state.json
