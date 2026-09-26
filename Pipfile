@@ -23,6 +23,10 @@ schedule = "*"
 mysql-connector-python = "*"
 mplfinance = "*"
 panel = "*"
+fastapi = "*"
+uvicorn = {extras = ["standard"], version = "*"}
+python-multipart = "*"
+bokeh-fastapi = "*"
 
 [dev-packages]
 
