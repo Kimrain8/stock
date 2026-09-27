@@ -233,27 +233,33 @@ logger.info("Panel mounted at %s", settings.EXPLORER_PATH)
 # 启动入口
 # ============================================================
 if __name__ == "__main__":
-  try:
-      sessions.purge_expired()
-  except Exception as e:
-      logger.warning("startup purge failed | err=%s", e)
+    try:
+        sessions.purge_expired()
+    except Exception as e:
+        logger.warning("startup purge failed | err=%s", e)
 
-  import uvicorn
-  ssl_kwargs = {}
-  if settings.USE_HTTPS:
-      ssl_kwargs = {
-          "ssl_certfile": settings.SSL_CERTFILE,
-          "ssl_keyfile": settings.SSL_KEYFILE,
-      }
-      logger.info("HTTPS enabled: cert=%s", settings.SSL_CERTFILE)
-
-  uvicorn.run(
-      "dashboard.server:app",
-      host=settings.HOST,
-      port=settings.PORT,
-      reload=False,
-      **ssl_kwargs,
-  )
+    import uvicorn
+    ssl_kwargs = {}
+    if settings.USE_HTTPS:
+        ssl_kwargs = {
+            "ssl_certfile": settings.SSL_CERTFILE,
+            "ssl_keyfile": settings.SSL_KEYFILE,
+        }
+        logger.info("HTTPS enabled: cert=%s", settings.SSL_CERTFILE)
+    uvicorn.run(
+        app,
+        host=settings.HOST,
+        port=settings.PORT,
+        access_log=False,
+        **ssl_kwargs,
+    )
+#   uvicorn.run(
+#       "dashboard.server:app",
+#       host=settings.HOST,
+#       port=settings.PORT,
+#       reload=False,
+#       **ssl_kwargs,
+#   )
   
   #region 清理session
   # import threading, time

@@ -617,7 +617,7 @@ class Myqq():
             # context = browser.contexts[0]
             # page = None
             context = await p.chromium.launch_persistent_context(
-                user_data_dir="./profile",headless=True)
+                user_data_dir="./chrome_user_data",headless=True)
             page = await context.new_page()
             
             if board_code == "aStock":
@@ -708,7 +708,7 @@ class Myqq():
             #         page = i
             #         break
             context = await p.chromium.launch_persistent_context(
-                user_data_dir="./profile",headless=True
+                user_data_dir="./chrome_user_data",headless=True
             )
             page = await context.new_page()
             await page.goto("https://stockapp.finance.qq.com/mstats/#mod=list&id=hy_second&module=hy&type=second")
@@ -825,7 +825,7 @@ class Myqq():
             # 只连接一次CDP，全局复用browser
             # browser = await p.chromium.connect_over_cdp("http://localhost:9222")
             context = await p.chromium.launch_persistent_context(
-                user_data_dir="./profile",headless=True
+                user_data_dir="./chrome_user_data",headless=True
             )
             browser = context.browser
             # page = await context.new_page()
@@ -1011,7 +1011,7 @@ class Myqq():
             """获取整个html的数据"""
             async with async_playwright() as p:
                 context = await p.chromium.launch_persistent_context(
-                    user_data_dir="./profile",headless=False)
+                    user_data_dir="./chrome_user_data",headless=False)
                 page = await context.new_page()
                 browse = context.browser
                 

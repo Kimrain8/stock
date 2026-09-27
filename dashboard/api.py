@@ -2,7 +2,7 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime,timezone
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
@@ -47,13 +47,22 @@ manager = ConnectionManager()
 # ---------- REST ----------
 @router.get("/health")
 async def health():
-    return {"status": "ok", "time": datetime.utcnow().isoformat()}
+    return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
 
 
 @router.get("/me")
 async def me(request: Request):
-    user = request.state.get("user") if hasattr(request, "state") else None
-    return {"user": user}
+    """返回当前登录用户信息。
+    request.state 是 Starlette 的 State 对象，用 getattr 读取。
+    """
+    user = getattr(request.state, "user", None)
+    role = getattr(request.state, "role", None)
+    dept = getattr(request.state, "dept", None)
+    return {
+        "user": user,
+        "role": role,
+        "dept": dept,
+    }
 
 
 # ---------- WebSocket ----------
@@ -72,7 +81,7 @@ async def ws_endpoint(ws: WebSocket):
             await ws.send_json({
                 "type": "echo",
                 "recv": data,
-                "ts": datetime.utcnow().isoformat(),
+                "ts": datetime.now(timezone.utc).isoformat(),
             })
     except WebSocketDisconnect:
         pass

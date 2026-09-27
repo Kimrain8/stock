@@ -2,9 +2,15 @@
 import logging
 import logging.handlers
 from .config import settings
-
+# 模块级 logger（setup_logging 里要用）
+logger = logging.getLogger("stock2.logger")
+# 幂等标记：只初始化一次
+_INITIALIZED = False
 
 def setup_logging() -> None:
+    global _INITIALIZED
+    if _INITIALIZED:
+        return
     settings.LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     root = logging.getLogger()
@@ -33,7 +39,16 @@ def setup_logging() -> None:
     )
     fh.setFormatter(fmt)
     root.addHandler(fh)
+    
+    # ---- 按资源类型设置不同级别 ----
+    for res_type, level in settings.RESOURCE_LOG_LEVELS.items():
+        lg = logging.getLogger(f"stock2.{res_type}")
+        lg.setLevel(level)
+        logger.info("log level set | logger=stock2.%s | level=%s", res_type, level)
 
     # 降噪：这些库在 DEBUG 下会刷屏
     for noisy in ("uvicorn.access", "panel", "bokeh", "tornado", "watchfiles", "asyncio"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    logger.info("logging initialized | root_level=%s", settings.LOG_LEVEL)
+    _INITIALIZED = True

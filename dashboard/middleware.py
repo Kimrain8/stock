@@ -7,6 +7,12 @@ from .config import settings
 from .permissions import engine, detect_resource_type
 
 logger = logging.getLogger("stock2.middleware")
+# 按资源类型分派的不同 logger
+_loggers = {
+    "api": logging.getLogger("stock2.api"),
+    "ws":  logging.getLogger("stock2.ws"),
+    "web": logging.getLogger("stock2.web"),
+}
 
 PUBLIC_PATHS = {
     settings.LOGIN_PATH,
@@ -15,13 +21,6 @@ PUBLIC_PATHS = {
     f"{settings.REST_API_PREFIX}/health",
 }
 
-
-PUBLIC_PATHS = {
-    settings.LOGIN_PATH,
-    settings.LOGOUT_PATH,
-    "/favicon.ico",
-    f"{settings.REST_API_PREFIX}/health",
-}
 
 STATIC_PREFIXES = (
     "/static/",
@@ -60,10 +59,16 @@ class AuthMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] not in ("http", "websocket"):
             return await self.app(scope, receive, send)
-
         path = scope.get("path", "")
-
+        method = scope.get("method", "")
+        client_ip = scope.get("client", ("?", 0))[0]
+        
+        # 资源类型提前判断（不依赖用户身份）
+        resource_type = detect_resource_type(scope["type"], path)
+        res_logger = _loggers.get(resource_type, logger)
+        
         if _is_public(path):
+            res_logger.debug("[SKIP-PUBLIC] %s %s", method, path)
             return await self.app(scope, receive, send)
 
         # ---------- 1. 认证 ----------
@@ -72,23 +77,49 @@ class AuthMiddleware:
         user_info = sessions.verify(token)
 
         if not user_info:
-            logger.warning("unauthorized | type=%s | path=%s",
-                           scope["type"], path)
+            res_logger.warning("[AUTH-FAIL] %s %s | client=%s",
+                               method, path, client_ip)
             return await self._reject(scope, receive, send, path)
 
         # ---------- 2. 授权 ----------
         username = user_info["username"]
         role = user_info.get("role") or "user"
         dept = user_info.get("dept")
-        resource_type = detect_resource_type(scope["type"], path)
-        allowed, reason = engine.check(username, role, dept, path, resource_type)
 
+        allowed, reason = engine.check(username, role, dept, path, resource_type)
         if not allowed:
-            logger.warning("forbidden | user=%s | role=%s | dept=%s | type=%s | path=%s | reason=%s",
-                           username, role, dept, resource_type, path, reason)
+            logger.warning("[FORBIDDEN] user=%s | role=%s | dept=%s | %s %s | reason=%s",
+                            username, role, dept, method, path, reason)
             return await self._reject(scope, receive, send, path, forbidden=True)
 
-        # ---------- 3. 注入 state ----------
+        # ---------- 3. 成功：一条日志，DEBUG_SCOPE 时附完整 scope ----------
+        if settings.DEBUG_SCOPE:
+            import json
+            info = {
+                "user": username,
+                "role": role,
+                "dept": dept,
+                "type": scope["type"],
+                "method": method,
+                "path": path,
+                "client": scope.get("client"),
+                "query": scope.get("query_string", b"").decode(),
+                "headers": {
+                    k.decode(): v.decode()
+                    for k, v in scope.get("headers", [])
+                },
+            }
+            res_logger.info(
+                "[ENTRY] %s",
+                json.dumps(info, indent=2, ensure_ascii=False),
+            )
+        else:
+            res_logger.info(
+                "[ENTRY] user=%s | role=%s | %s %s | type=%s | client=%s",
+                username, role, method, path, resource_type, client_ip,
+            )
+
+        # ---------- 4. 注入 state ----------
         if "state" not in scope:
             scope["state"] = {}
         scope["state"]["user"] = username

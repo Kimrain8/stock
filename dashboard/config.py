@@ -34,17 +34,25 @@ class Settings:
         self.HOME_PATH = "/"
         self.LOGIN_PATH = "/login"
         self.LOGOUT_PATH = "/logout"
-        self.DB_NAME = os.getenv("APP_DB_NAME", "jhd_rd")
         
         # ---- SSO 固定凭据 ----
-        self.USERNAME = os.getenv("APP_USERNAME", "kim")
-        self.PASSWORD = os.getenv("APP_PASSWORD", "kim168")
+        # self.USERNAME = os.getenv("APP_USERNAME", "kim")
+        # self.PASSWORD = os.getenv("APP_PASSWORD", "kim168")
         self.SESSION_COOKIE = os.getenv("APP_SESSION_COOKIE", "stock2_session")
         self.SESSION_TTL_HOURS = int(os.getenv("APP_SESSION_TTL_HOURS", "8"))
 
         # ---- 日志 ----
         self.LOG_LEVEL = os.getenv("APP_LOG_LEVEL", "INFO")
         self.LOG_DIR = Path(os.getenv("APP_LOG_DIR", str(BASE_DIR / "logs")))
+
+        self.DEBUG = os.getenv("APP_DEBUG", "false").lower() in ("1", "true", "yes")
+        self.DEBUG_SCOPE = os.getenv("APP_DEBUG_SCOPE", "false").lower() in ("1", "true", "yes")
+        
+        self.RESOURCE_LOG_LEVELS = {
+            "api": os.getenv("APP_LOG_LEVEL_API", "WARNING"),
+            "ws":  os.getenv("APP_LOG_LEVEL_WS",  "DEBUG"),
+            "web": os.getenv("APP_LOG_LEVEL_WEB", "INFO"),
+        }
 
 
 settings = Settings()

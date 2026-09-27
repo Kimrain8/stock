@@ -1,5 +1,5 @@
 """生成自签名 HTTPS 证书（仅开发用）"""
-import datetime
+from datetime import datetime,timezone,timedelta
 import ipaddress
 from pathlib import Path
 
@@ -25,8 +25,8 @@ def generate(cert_path: Path, key_path: Path):
         .issuer_name(issuer)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.datetime.utcnow())
-        .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=365))
+        .not_valid_before(datetime.now(timezone.utc))
+        .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
         .add_extension(x509.SubjectAlternativeName([
             x509.DNSName("localhost"),
             x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
