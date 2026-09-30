@@ -1,13 +1,11 @@
-"""数据预处理 — 把 DataFrame 压缩成 LLM 能读的文本。
-
-目标：把 fetch_all 的输出压成几千 token 的文本，给 agent 用。
-"""
 import logging
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
-
+"""数据预处理 — 把 DataFrame 压缩成 LLM 能读的文本。
+目标：把 fetch_all 的输出压成几千 token 的文本，给 agent 用。
+"""
 logger = logging.getLogger("stock2.preprocessor")
 
 
@@ -23,7 +21,6 @@ def _is_nan(v) -> bool:
 
 
 def _fmt(v, unit: str = "", digits: int = 2) -> str:
-    """把数值转成字符串。"""
     if _is_nan(v):
         return "—"
     try:
@@ -41,11 +38,23 @@ def _fmt(v, unit: str = "", digits: int = 2) -> str:
         return str(v)
 
 
+def _has_data(data) -> bool:
+    """判断数据是否有效（非空）。"""
+    if data is None:
+        return False
+    if isinstance(data, pd.DataFrame):
+        return not data.empty
+    if isinstance(data, dict):
+        return bool(data)
+    if isinstance(data, (list, tuple)):
+        return len(data) > 0
+    return bool(data)
+
+
 # ============================================================
 # 基本信息
 # ============================================================
 def build_basic_text(basic: dict) -> str:
-    """基本信息压缩成一段文本。"""
     if not basic:
         return "（无基本信息）"
 
@@ -77,23 +86,15 @@ def build_basic_text(basic: dict) -> str:
 # 财务摘要
 # ============================================================
 def build_financial_text(financials: dict, max_periods: int = 8) -> str:
-    """财务摘要 → 关键指标表。
-
-    输入 abstract 表结构：
-        列 = ['选项', '指标', '20260630', '20260331', ...]
-        行 = 各指标
-    """
     if not financials:
         return "（无财务数据）"
     df = financials.get("abstract")
     if df is None or df.empty:
         return "（无财务数据）"
 
-    # 日期列（排除"选项"和"指标"）
     date_cols = [c for c in df.columns if c not in ("选项", "指标")]
     date_cols = sorted(date_cols, reverse=True)[:max_periods]
 
-    # 关注的指标（按顺序展示）
     key_indicators = [
         "营业总收入", "营业收入",
         "营业成本",
@@ -107,7 +108,6 @@ def build_financial_text(financials: dict, max_periods: int = 8) -> str:
     ]
 
     lines = []
-    # 表头
     header = f"{'指标':<16}" + "".join(f"{c:>14}" for c in date_cols)
     lines.append(header)
     lines.append("-" * len(header))
@@ -116,7 +116,6 @@ def build_financial_text(financials: dict, max_periods: int = 8) -> str:
     for kw in key_indicators:
         if kw in used:
             continue
-        # 匹配
         row = df[df["指标"].astype(str).str.contains(kw, na=False, regex=False)]
         if row.empty:
             continue
@@ -129,7 +128,6 @@ def build_financial_text(financials: dict, max_periods: int = 8) -> str:
                 values.append("—")
             else:
                 try:
-                    # 通用单位：元 → 万元
                     values.append(f"{float(v) / 1e4:,.0f}")
                 except Exception:
                     values.append(str(v)[:12])
@@ -142,14 +140,12 @@ def build_financial_text(financials: dict, max_periods: int = 8) -> str:
 # 财务指标
 # ============================================================
 def build_indicators_text(financials: dict, max_periods: int = 6) -> str:
-    """财务指标（比率类）→ 文本。"""
     if not financials:
         return "（无指标数据）"
     df = financials.get("indicators")
     if df is None or df.empty:
         return "（无指标数据）"
 
-    # 关注的关键比率
     key_cols = [
         "日期",
         "摊薄每股收益(元)", "加权每股收益(元)",
@@ -168,11 +164,9 @@ def build_indicators_text(financials: dict, max_periods: int = 6) -> str:
     if len(avail_cols) <= 1:
         return "（无关键指标）"
 
-    # 取最近 N 期
     df = df.head(max_periods)
 
     lines = []
-    # 表头
     header = f"{'指标':<24}" + "".join(f"{str(d):>10}" for d in df["日期"])
     lines.append(header)
     lines.append("-" * len(header))
@@ -225,7 +219,6 @@ def _classify(title: str) -> str:
 
 
 def build_announcements_text(ann: pd.DataFrame, max_items: int = 25) -> str:
-    """公告 → 事件列表。"""
     if ann is None or ann.empty:
         return "（近 90 天无公告）"
 
@@ -243,7 +236,6 @@ def build_announcements_text(ann: pd.DataFrame, max_items: int = 25) -> str:
 # 行情
 # ============================================================
 def build_quote_text(quotes: pd.DataFrame) -> str:
-    """行情 → 涨跌幅、成交量分析。"""
     if quotes is None or quotes.empty:
         return "（无行情数据）"
 
@@ -275,7 +267,6 @@ def build_quote_text(quotes: pd.DataFrame) -> str:
         f"- 近 20 日最低：{close.tail(20).min():.2f}",
     ]
 
-    # 成交量分析
     if "volume" in df.columns:
         v20 = df["volume"].tail(20).mean()
         v5 = df["volume"].tail(5).mean()
@@ -289,7 +280,6 @@ def build_quote_text(quotes: pd.DataFrame) -> str:
                 tag = "平量"
             lines.append(f"- 近 5 日/20 日成交量比：{ratio:.2f}（{tag}）")
 
-    # 最近 5 日
     lines.append("\n最近 5 个交易日：")
     for _, r in df.tail(5).iterrows():
         lines.append(
@@ -318,24 +308,165 @@ def build_dividend_text(div: pd.DataFrame) -> str:
 
 
 # ============================================================
+# 解禁
+# ============================================================
+def _build_release_text(release) -> str:
+    """限售股解禁（历史记录）。
+
+    返回值语义：
+        None / 空 DataFrame → "（数据缺失）"
+        非空 → 逐条列出
+    """
+    if release is None:
+        return "（数据缺失）"
+    if not isinstance(release, pd.DataFrame) or release.empty:
+        return "（数据缺失）"
+
+    try:
+        cols = list(release.columns)
+
+        def _has(c):
+            return c in cols
+
+        lines = []
+        for _, r in release.head(8).iterrows():
+            parts = []
+            if _has("解禁时间"):
+                parts.append(f"{str(r['解禁时间'])[:10]}")
+            if _has("限售股类型"):
+                parts.append(f"{r['限售股类型']}")
+            if _has("实际解禁数量"):
+                try:
+                    parts.append(f"数量={float(r['实际解禁数量']):,.0f}")
+                except Exception:
+                    parts.append(f"数量={r['实际解禁数量']}")
+            if _has("占总市值比例"):
+                try:
+                    pct = float(r["占总市值比例"])
+                    if pct < 1:
+                        pct *= 100
+                    parts.append(f"占总股本={pct:.2f}%")
+                except Exception:
+                    parts.append(f"占总股本={r['占总市值比例']}")
+            if parts:
+                lines.append("  " + " | ".join(parts))
+
+        return "\n".join(lines) if lines else "（数据解析失败）"
+    except Exception as e:
+        logger.warning("build release text failed | %s", e)
+        return "（数据解析失败）"
+
+
+# ============================================================
+# 股东户数
+# ============================================================
+def _build_holder_text(holder) -> str:
+    """股东户数。"""
+    if holder is None:
+        return "（数据缺失）"
+    if not isinstance(holder, pd.DataFrame) or holder.empty:
+        return "（数据缺失）"
+
+    try:
+        cols = list(holder.columns)
+
+        def _has(c):
+            return c in cols
+
+        df_sorted = holder.copy()
+        if _has("股东户数统计截止日"):
+            df_sorted = df_sorted.sort_values("股东户数统计截止日")
+
+        lines = []
+        for _, r in df_sorted.tail(8).iterrows():
+            parts = []
+            if _has("股东户数统计截止日"):
+                parts.append(f"{str(r['股东户数统计截止日'])[:10]}")
+            if _has("股东户数-本次"):
+                parts.append(f"户数={r['股东户数-本次']}")
+            if _has("股东户数-上次"):
+                parts.append(f"上次={r['股东户数-上次']}")
+            if _has("股东户数-增减比例"):
+                try:
+                    pct = float(r["股东户数-增减比例"])
+                    parts.append(f"变化={pct:+.2f}%")
+                except Exception:
+                    parts.append(f"变化={r['股东户数-增减比例']}")
+            if parts:
+                lines.append("  " + " | ".join(parts))
+
+        return "\n".join(lines) if lines else "（数据解析失败）"
+    except Exception as e:
+        logger.warning("build holder text failed | %s", e)
+        return "（数据解析失败）"
+
+
+# ============================================================
+# 质押
+# ============================================================
+def _build_pledge_text(pledge) -> str:
+    """股权质押（只显示未解押）。
+
+    返回值语义（重要）：
+        None              → **数据缺失**（数据源不可用）
+        空 DataFrame      → **该股票无未解押记录**（安全信号）
+        非空 DataFrame    → 逐条列出
+    """
+    if pledge is None:
+        return "（数据缺失：质押数据源暂不可用）"
+    if not isinstance(pledge, pd.DataFrame):
+        return "（数据缺失）"
+    if pledge.empty:
+        return "（该股票当前无未解押质押记录）"
+
+    try:
+        cols = list(pledge.columns)
+
+        def _has(c):
+            return c in cols
+
+        lines = []
+        for _, r in pledge.head(10).iterrows():
+            parts = []
+            if _has("股东名称"):
+                parts.append(f"{str(r['股东名称'])[:20]}")
+            if _has("占所持股份比例"):
+                parts.append(f"占所持={r['占所持股份比例']}%")
+            if _has("占总股本比例"):
+                parts.append(f"占总股本={r['占总股本比例']}%")
+            if _has("质押股份数量"):
+                try:
+                    parts.append(f"数量={float(r['质押股份数量']):,.0f}")
+                except Exception:
+                    parts.append(f"数量={r['质押股份数量']}")
+            if _has("质押开始日期"):
+                parts.append(f"起始={str(r['质押开始日期'])[:10]}")
+            if parts:
+                lines.append("  " + " | ".join(parts))
+
+        return "\n".join(lines) if lines else "（数据解析失败）"
+    except Exception as e:
+        logger.warning("build pledge text failed | %s", e)
+        return "（数据解析失败）"
+
+
+# ============================================================
+# 实时快照
+# ============================================================
+def _build_spot_text(spot: dict) -> str:
+    if not spot:
+        return "（无实时快照）"
+    keys = ["名称", "最新价", "涨跌幅", "成交量", "成交额", "昨收", "今开"]
+    lines = [f"- {k}: {spot[k]}" for k in keys
+             if k in spot and not _is_nan(spot[k])]
+    return "\n".join(lines) if lines else "（无实时快照）"
+
+
+# ============================================================
 # 主入口
 # ============================================================
 def preprocess(data: dict) -> dict:
-    """把 fetch_all 的输出转成 LLM 友好的文本 dict。
-
-    返回：
-        {
-            "ts_code": str,
-            "name": str,
-            "basic_text": str,
-            "financial_text": str,
-            "indicators_text": str,
-            "announcements_text": str,
-            "quote_text": str,
-            "dividend_text": str,
-            "spot_text": str,
-        }
-    """
+    """把 fetch_all 的输出转成 LLM 友好的文本 dict。"""
     ts_code = data.get("ts_code", "")
     basic = data.get("basic") or {}
 
@@ -351,20 +482,19 @@ def preprocess(data: dict) -> dict:
         "quote_text": build_quote_text(data.get("quotes")),
         "dividend_text": build_dividend_text(data.get("dividends")),
         "spot_text": _build_spot_text(data.get("spot") or {}),
+        "release_text": _build_release_text(data.get("release")),
+        "holder_text": _build_holder_text(data.get("holder")),
+        "pledge_text": _build_pledge_text(data.get("pledge")),
     }
     logger.info(
-        "preprocess done | %s | fin_len=%d | ann_len=%d | quote_len=%d",
+        "preprocess done | %s | fin_len=%d | ann_len=%d | quote_len=%d "
+        "| release=%s | holder=%s | pledge=%s",
         ts_code,
         len(result["financial_text"]),
         len(result["announcements_text"]),
         len(result["quote_text"]),
+        "有" if _has_data(data.get("release")) else "无",
+        "有" if _has_data(data.get("holder")) else "无",
+        "有" if data.get("pledge") is not None else "无",
     )
     return result
-
-
-def _build_spot_text(spot: dict) -> str:
-    if not spot:
-        return "（无实时快照）"
-    keys = ["名称", "最新价", "涨跌幅", "成交量", "成交额", "昨收", "今开"]
-    lines = [f"- {k}: {spot[k]}" for k in keys if k in spot and not _is_nan(spot[k])]
-    return "\n".join(lines) if lines else "（无实时快照）"

@@ -8,6 +8,9 @@ browsers/
 dashboard/__pycache__/
 cache/
 .panel/
+logs/
+certs/
+.env
 *.log
 *.lock
 *.state.json

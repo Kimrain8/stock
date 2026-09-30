@@ -301,6 +301,11 @@ async def judge(pre: dict, analyst_results: dict,
         indicators_text=pre.get("indicators_text", ""),
         announcements_text=pre.get("announcements_text", ""),
         quote_text=pre.get("quote_text", ""),
+        # ---- 新增 ----
+        release_text=pre.get("release_text", "（数据缺失）"),
+        holder_text=pre.get("holder_text", "（数据缺失）"),
+        pledge_text=pre.get("pledge_text", "（数据缺失）"),
+        
         fundamental_score=fund.get("score", "?"),
         fundamental_json=json.dumps(
             {k: v for k, v in fund.items() if not k.startswith("_")},
