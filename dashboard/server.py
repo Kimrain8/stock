@@ -13,6 +13,9 @@ from .auth import authenticate, sessions
 from .middleware import AuthMiddleware
 from .api import router as api_router
 from .explorer import build_explorer
+from .trend import build_trend
+from .scan import build_scan
+from .analysis_page import build_analysis_page
 
 setup_logging()
 logger = logging.getLogger("stock2.server")
@@ -158,6 +161,18 @@ HOME_HTML = Template("""<!doctype html>
       <h2>🔔 WebSocket 测试</h2>
       <p>点击向 $ws_path 发送一条消息</p>
     </a>
+    <a class="card" href="$trend">
+      <h2>📈 趋势探索</h2>
+      <p>均价区间 · 连续涨跌天数</p>
+    </a>
+    <a class="card" href="$scan">
+      <h2>🔍 选股扫描</h2>
+      <p>N 日内涨幅筛选 · 多规则组合</p>
+    </a>
+    <a class="card" href="$analysis">
+      <h2>🧠 智能分析</h2>
+      <p>4 Agent 协同 · 规则闭环学习</p>
+    </a>
   </div>
   <script>
     const ws = new WebSocket(`$${location.protocol === 'https:' ? 'wss' : 'ws'}://$${location.host}$ws_path`);
@@ -178,6 +193,9 @@ async def home(request: Request):
     return HOME_HTML.substitute(
         user=user,
         explorer=settings.EXPLORER_PATH,
+        trend=getattr(settings, "TREND_PATH", "/trend"),
+        scan=settings.SCAN_PATH,
+        analysis=settings.ANALYSIS_PATH,
         api_docs=f"{settings.REST_API_PREFIX}/docs",
         ws_path=settings.WS_API_PATH,
     )
@@ -225,7 +243,18 @@ async def purge_sessions(request: Request):
 # 挂载 Panel 探索器
 # ============================================================
 explorer_app = build_explorer()
-add_applications({settings.EXPLORER_PATH: explorer_app}, app=app)
+trend_app = build_trend()
+scan_app = build_scan()
+analysis_app = build_analysis_page()
+add_applications(
+    {
+        settings.EXPLORER_PATH: explorer_app,
+        settings.TREND_PATH: trend_app,
+        settings.SCAN_PATH: scan_app,
+        settings.ANALYSIS_PATH: analysis_app,
+    }, 
+    app=app
+)
 logger.info("Panel mounted at %s", settings.EXPLORER_PATH)
 
 

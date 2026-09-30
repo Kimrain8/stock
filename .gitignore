@@ -6,6 +6,7 @@ outputs/
 akquant-main/
 browsers/
 dashboard/__pycache__/
+cache/
 .panel/
 *.log
 *.lock

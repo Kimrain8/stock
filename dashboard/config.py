@@ -31,9 +31,13 @@ class Settings:
         self.REST_API_PREFIX = os.getenv("APP_REST_API_PREFIX", "/api")
         self.WS_API_SUBPATH = os.getenv("APP_WS_API_SUBPATH", "/ws")     # 相对 REST 前缀
         self.EXPLORER_PATH = os.getenv("APP_EXPLORER_PATH", "/explorer")
+        self.TREND_PATH = os.getenv("APP_TREND_PATH", "/trend")
+        self.SCAN_PATH = os.getenv("APP_SCAN_PATH", "/scan")
+        self.ANALYSIS_PATH = os.getenv("APP_ANALYSIS_PATH", "/analysis")
         self.HOME_PATH = "/"
         self.LOGIN_PATH = "/login"
         self.LOGOUT_PATH = "/logout"
+        
         
         # ---- SSO 固定凭据 ----
         # self.USERNAME = os.getenv("APP_USERNAME", "kim")

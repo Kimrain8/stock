@@ -27,6 +27,7 @@ fastapi = "*"
 uvicorn = {extras = ["standard"], version = "*"}
 python-multipart = "*"
 bokeh-fastapi = "*"
+hvplot = "*"
 
 [dev-packages]
 
