@@ -2,17 +2,20 @@
 
 特性：
     - 会话级 Python 命名空间
-    - 3 个折叠区域（SQL/缓存、代码编辑器、执行结果）
-    - Ctrl+Enter 快捷键（浏览器脚本注入，含 Shadow DOM 递归查找）
+    - 4 个折叠卡片（数据库/缓存、自然语言选股、代码编辑器、执行结果）
+    - Ctrl+Enter 快捷键（浏览器脚本注入）
     - 5 个数据源：SQL、上传、缓存、scan 结果、analysis 结果
-    - 左栏选中变量时显示列名 + 样例值
+    - 自然语言选股（知识库驱动）
+    - 结果标记：_all_pass / condN_pass / condN_reason
 """
 import ast
 import contextlib
 import io
 import logging
 import pickle
+import re
 import traceback
+from decimal import Decimal
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +25,7 @@ import panel as pn
 from utils.dbManager import MySQLHelper
 from .auth import sessions
 from .config import settings
+from .analysis.nl_filter import NLFilterEngine
 
 logger = logging.getLogger("stock2.workbench")
 
@@ -165,13 +169,31 @@ def _exec_sql(sql):
     sql = (sql or "").strip().rstrip(";")
     if not sql:
         return pd.DataFrame()
+
     head = sql.lstrip().upper()
     if not head.startswith(("SELECT", "SHOW", "DESC", "EXPLAIN")):
         raise ValueError("只支持 SELECT / SHOW / DESC / EXPLAIN")
-    if head.startswith("SELECT") and " LIMIT " not in sql.upper():
+
+    if head.startswith("SELECT") and not re.search(r"\blimit\b", sql, re.IGNORECASE):
         sql = f"{sql} LIMIT 100000"
+
     df = _db().qry2df(sql=sql)
-    return df if df is not None else pd.DataFrame()
+    if df is None:
+        return pd.DataFrame()
+
+    # Decimal → float
+    for col in df.columns:
+        s = df[col]
+        if s.dtype == object:
+            sample = s.dropna().head(5)
+            if len(sample) > 0 and isinstance(sample.iloc[0], Decimal):
+                try:
+                    df[col] = s.apply(
+                        lambda x: float(x) if isinstance(x, Decimal) else x
+                    )
+                except Exception:
+                    pass
+    return df
 
 
 def _list_db_tables():
@@ -193,21 +215,98 @@ def _list_cache_codes():
 
 
 # ============================================================
-# 渲染
+# 渲染辅助
 # ============================================================
+def _sanitize_df(df: pd.DataFrame) -> pd.DataFrame:
+    """清理 DataFrame 中的不可序列化对象。"""
+    df = df.copy()
+    for col in df.columns:
+        s = df[col]
+        if s.dtype == object:
+            sample_vals = s.dropna().head(5)
+            if len(sample_vals) > 0:
+                first = sample_vals.iloc[0]
+                if isinstance(first, Decimal):
+                    try:
+                        df[col] = s.apply(
+                            lambda x: float(x) if isinstance(x, Decimal)
+                            else (None if pd.isna(x) else x)
+                        )
+                        continue
+                    except Exception:
+                        pass
+                if hasattr(first, "tzinfo") and first.tzinfo is not None:
+                    try:
+                        df[col] = s.dt.tz_localize(None)
+                        continue
+                    except Exception:
+                        pass
+            try:
+                df[col] = s.apply(
+                    lambda x: x if isinstance(x, (str, int, float, bool, type(None)))
+                    else (None if pd.isna(x) else str(x))
+                )
+            except Exception:
+                pass
+    return df
+
+
+def _reorder_and_sort(df: pd.DataFrame) -> pd.DataFrame:
+    """列重排 + 按 _all_pass 降序。
+
+    列顺序：_all_pass | condN_pass | condN_reason | 原始列
+    """
+    if df is None or df.empty:
+        return df
+
+    def _col_num(c):
+        m = re.search(r"\d+", c)
+        return int(m.group()) if m else 0
+
+    prefix_cols = []
+    if "_all_pass" in df.columns:
+        prefix_cols.append("_all_pass")
+
+    cond_pass_cols = sorted(
+        [c for c in df.columns
+         if c.startswith("cond") and c.endswith("_pass")],
+        key=_col_num,
+    )
+    cond_reason_cols = sorted(
+        [c for c in df.columns
+         if c.startswith("cond") and c.endswith("_reason")],
+        key=_col_num,
+    )
+    ordered = prefix_cols + cond_pass_cols + cond_reason_cols
+    other_cols = [c for c in df.columns if c not in ordered]
+
+    out = df[ordered + other_cols].copy()
+    if "_all_pass" in out.columns:
+        out = out.sort_values("_all_pass", ascending=False).reset_index(drop=True)
+    return out
+
+
 def render_value(value):
     if value is None:
         return None
     if isinstance(value, pd.DataFrame):
         if value.empty:
             return pn.pane.Markdown("*(空 DataFrame)*")
+        try:
+            safe = _sanitize_df(value.head(500))
+        except Exception:
+            safe = value.head(500)
         return pn.widgets.Tabulator(
-            value.head(200), page_size=20, show_index=False,
+            safe, page_size=20, show_index=False,
             sizing_mode="stretch_width", height=320,
         )
     if isinstance(value, pd.Series):
+        try:
+            safe = _sanitize_df(value.head(500).to_frame())
+        except Exception:
+            safe = value.head(500).to_frame()
         return pn.widgets.Tabulator(
-            value.head(200).to_frame(), page_size=20,
+            safe, page_size=20,
             sizing_mode="stretch_width", height=320,
         )
     try:
@@ -227,7 +326,6 @@ def render_value(value):
 
 
 def _sample_value(series, max_len=22):
-    """取 Series 中第一个非空值作为样例。"""
     try:
         for v in series:
             if pd.isna(v):
@@ -242,7 +340,6 @@ def _sample_value(series, max_len=22):
 
 
 def _make_var_info(name, value):
-    """生成变量信息的 Markdown。"""
     if isinstance(value, pd.DataFrame):
         lines = [
             f"**`{name}`**",
@@ -257,42 +354,30 @@ def _make_var_info(name, value):
         if len(value.columns) > max_cols:
             lines.append(f"- ...（还有 {len(value.columns) - max_cols} 列）")
         return "\n".join(lines)
-
     if isinstance(value, pd.Series):
-        dtype = str(value.dtype)
-        sample = _sample_value(value)
         return (
             f"**`{name}`**\n\n"
-            f"*Series · {len(value)} 项 · {dtype}*\n\n"
-            f"- 样例值: {sample}"
+            f"*Series · {len(value)} 项 · {value.dtype}*\n\n"
+            f"- 样例值: {_sample_value(value)}"
         )
-
     if isinstance(value, dict):
         lines = [f"**`{name}`**", f"*dict · {len(value)} 键*", ""]
         for k in list(value.keys())[:20]:
-            v = value[k]
-            s = str(v)[:22]
-            lines.append(f"- `{k}`: {s}")
+            lines.append(f"- `{k}`: {str(value[k])[:22]}")
         return "\n".join(lines)
-
     if isinstance(value, (list, tuple, set)):
-        return (
-            f"**`{name}`**\n\n"
-            f"*{type(value).__name__} · {len(value)} 项*"
-        )
-
+        return f"**`{name}`**\n\n*{type(value).__name__} · {len(value)} 项*"
     return f"**`{name}`**\n\n*{type(value).__name__}*"
 
 
 # ============================================================
-# Ctrl+Enter 脚本（浏览器端注入，含 Shadow DOM 递归查找）
+# Ctrl+Enter 脚本
 # ============================================================
 CTRL_ENTER_SCRIPT = """
 <script>
 (function() {
     if (window.__wbCtrlEnterBound) return;
     window.__wbCtrlEnterBound = true;
-
     function findAllButtons(root) {
         var btns = Array.from(root.querySelectorAll('button'));
         root.querySelectorAll('*').forEach(function(el) {
@@ -302,11 +387,9 @@ CTRL_ENTER_SCRIPT = """
         });
         return btns;
     }
-
     document.addEventListener('keydown', function(e) {
         if (!e.ctrlKey) return;
         if (e.key !== 'Enter' && e.keyCode !== 13) return;
-
         var btns = findAllButtons(document);
         var runBtn = null;
         for (var i = 0; i < btns.length; i++) {
@@ -317,13 +400,11 @@ CTRL_ENTER_SCRIPT = """
             }
         }
         if (!runBtn) return;
-
         e.preventDefault();
         e.stopPropagation();
         runBtn.click();
         return false;
     }, true);
-
     console.log('[workbench] Ctrl+Enter bound');
 })();
 </script>
@@ -340,7 +421,7 @@ def _build_ui():
     logger.info("workbench build | user=%s | session=%s", username, sid)
 
     # ============================================================
-    # 左栏：数据源 & 变量
+    # 左栏控件
     # ============================================================
     sql_btn = pn.widgets.Button(name="🔍 SQL 查询", width=190)
     upload_input = pn.widgets.FileInput(width=190)
@@ -354,23 +435,19 @@ def _build_ui():
     )
     delete_btn = pn.widgets.Button(name="🗑 删除选中", width=210)
 
-    # ---- 变量信息面板（列名 + 样例值） ----
     var_info = pn.pane.Markdown(
         "*选中变量后显示列信息*",
         width=210,
         styles={
-            "background": "#ffffff",
-            "padding": "8px 10px",
-            "border": "1px solid #e0e0e0",
-            "border-radius": "4px",
-            "font-size": "11px",
-            "max-height": "400px",
+            "background": "#ffffff", "padding": "8px 10px",
+            "border": "1px solid #e0e0e0", "border-radius": "4px",
+            "font-size": "11px", "max-height": "400px",
             "overflow-y": "auto",
         },
     )
 
     # ============================================================
-    # SQL / 缓存 内容区（可变内容）
+    # SQL 内容
     # ============================================================
     sql_content = pn.Column(
         pn.pane.Markdown("*点击左侧按钮加载数据*"),
@@ -378,13 +455,46 @@ def _build_ui():
     )
 
     # ============================================================
+    # NL 选股控件
+    # ============================================================
+    nl_engine = NLFilterEngine()
+    nl_state = {"conditions": [], "target_df": None}
+
+    nl_target = pn.widgets.Select(
+        name="目标变量", options=[], width=280,
+    )
+    nl_input = pn.widgets.TextAreaInput(
+        name="描述",
+        placeholder="例：股价低于10元 且 换手率大于3%",
+        height=60,
+        sizing_mode="stretch_width",
+    )
+    nl_parse_btn = pn.widgets.Button(
+        name="🔍 解析并添加条件", button_type="primary", width=180,
+    )
+    nl_reload_btn = pn.widgets.Button(
+        name="🔄 重载知识库", width=120,
+    )
+    nl_apply_btn = pn.widgets.Button(
+        name="✅ 应用全部条件", button_type="success", width=160,
+    )
+    nl_view_btn = pn.widgets.Button(
+        name="📊 查看结果清单", width=140,
+    )
+    nl_view_passed_btn = pn.widgets.Button(
+        name="📋 仅看通过", button_type="default", width=120,
+    )
+    nl_msg = pn.pane.Markdown("", sizing_mode="stretch_width")
+    nl_cond_list = pn.Column(sizing_mode="stretch_width")
+
+    # ============================================================
     # 代码编辑器
     # ============================================================
     editor = pn.widgets.CodeEditor(
         value=(
-            "# 例：df_scan.head()\n"
-            "# 例：df_scan[df_scan['growth'] > 0.5]\n"
-            "# 例：import plotly.express as px; px.bar(df_scan, x='ts_code', y='growth')\n"
+            "# 例：df_daily.head()\n"
+            "# 例：df_daily[df_daily['_all_pass']]\n"
+            "# 例：import plotly.express as px; px.bar(df_daily, x='ts_code', y='close')\n"
             "#\n"
             "# 快捷键：Ctrl+Enter 执行\n"
         ),
@@ -402,11 +512,27 @@ def _build_ui():
     out_value = pn.Column(sizing_mode="stretch_width")
 
     # ============================================================
-    # 折叠卡片（3 个）
+    # 折叠卡片（在回调之前定义，因为回调会引用）
     # ============================================================
     sql_card = pn.Card(
         sql_content,
         title="🔍 数据库 / 缓存",
+        collapsed=True,
+        sizing_mode="stretch_width",
+    )
+    nl_card = pn.Card(
+        pn.Column(
+            pn.Row(nl_target, nl_reload_btn),
+            nl_input,
+            pn.Row(nl_parse_btn, nl_apply_btn,
+                   nl_view_btn, nl_view_passed_btn),
+            nl_msg,
+            pn.layout.Divider(),
+            pn.pane.Markdown("**已添加条件**"),
+            nl_cond_list,
+            sizing_mode="stretch_width",
+        ),
+        title="🎯 自然语言选股",
         collapsed=True,
         sizing_mode="stretch_width",
     )
@@ -433,16 +559,21 @@ def _build_ui():
     )
 
     # ============================================================
-    # 逻辑
+    # 回调：变量
     # ============================================================
     def _refresh_vars():
         var_select.options = ws.list_user_vars()
         if var_select.value not in var_select.options:
             var_select.value = None
             var_info.object = "*选中变量后显示列信息*"
+        df_options = []
+        for v in ws.list_user_vars():
+            name = v.split("  [")[0].strip()
+            if name in ws.ns and isinstance(ws.ns[name], pd.DataFrame):
+                df_options.append(v)
+        nl_target.options = df_options
 
     def _on_var_select(event):
-        """选中变量时更新列信息面板。"""
         if not event.new:
             var_info.object = "*选中变量后显示列信息*"
             return
@@ -450,13 +581,10 @@ def _build_ui():
         if name not in ws.ns:
             var_info.object = "*选中变量后显示列信息*"
             return
-        value = ws.ns[name]
         try:
-            var_info.object = _make_var_info(name, value)
+            var_info.object = _make_var_info(name, ws.ns[name])
         except Exception as e:
             var_info.object = f"**错误**：{e}"
-
-    var_select.param.watch(_on_var_select, "value")
 
     def _delete_var(event):
         if not var_select.value:
@@ -466,9 +594,207 @@ def _build_ui():
         _refresh_vars()
         var_info.object = "*选中变量后显示列信息*"
 
+    var_select.param.watch(_on_var_select, "value")
     delete_btn.on_click(_delete_var)
 
-    # ---------- SQL ----------
+    # ============================================================
+    # 回调：NL 选股
+    # ============================================================
+    def _render_conditions():
+        nl_cond_list.clear()
+        if not nl_state["conditions"]:
+            nl_cond_list.append(pn.pane.Markdown("*尚未添加条件*"))
+            return
+        for i, cond in enumerate(nl_state["conditions"], 1):
+            if cond.error:
+                item = pn.pane.Markdown(
+                    f"**{i}. {cond.raw}** ❌ {cond.error}",
+                    styles={"color": "#c00", "font-size": "12px"},
+                )
+            else:
+                item = pn.pane.Markdown(
+                    f"**{i}. {cond.raw}** → `{cond.column}` · "
+                    f"{cond.description}",
+                    styles={"color": "#333", "font-size": "12px"},
+                )
+            remove = pn.widgets.Button(
+                name="❌", width=50, button_type="danger",
+            )
+
+            def _remove(event, idx=i - 1):
+                nl_state["conditions"].pop(idx)
+                _render_conditions()
+
+            remove.on_click(_remove)
+            nl_cond_list.append(
+                pn.Row(item, remove, sizing_mode="stretch_width")
+            )
+
+    def _on_parse(event):
+        text = (nl_input.value or "").strip()
+        if not text:
+            nl_msg.object = "**⚠️ 请输入描述**"
+            return
+        if not nl_target.value:
+            nl_msg.object = "**⚠️ 请先选择目标变量**"
+            return
+        name = nl_target.value.split("  [")[0].strip()
+        df = ws.ns.get(name)
+        if not isinstance(df, pd.DataFrame):
+            nl_msg.object = f"**⚠️ `{name}` 不是 DataFrame**"
+            return
+        new_conds = nl_engine.parse(text, df)
+        if not new_conds:
+            nl_msg.object = "**⚠️ 未解析出条件**"
+            return
+        existing_raws = {c.raw for c in nl_state["conditions"]}
+        added, skipped = [], []
+        for c in new_conds:
+            if c.raw in existing_raws:
+                skipped.append(c.raw)
+            else:
+                added.append(c)
+                existing_raws.add(c.raw)
+        if not added:
+            nl_msg.object = (
+                f"**⚠️ {len(skipped)} 条条件已存在，未添加**"
+            )
+            return
+        nl_state["conditions"].extend(added)
+        nl_state["target_df"] = name
+        _render_conditions()
+        ok = sum(1 for c in added if not c.error)
+        err = len(added) - ok
+        msg = f"**✅ 已添加 {len(added)} 条条件**（成功 {ok}，失败 {err}）"
+        if skipped:
+            msg += f"\n\n跳过重复：{len(skipped)} 条"
+        nl_msg.object = msg
+
+    def _on_reload(event):
+        nl_engine.reload()
+        nl_msg.object = (
+            f"**✅ 知识库已重载** · "
+            f"字段 {len(nl_engine.aliases)} 条 · "
+            f"模板 {len(nl_engine.templates)} 条"
+        )
+
+    def _on_apply(event):
+        if not nl_state["conditions"]:
+            nl_msg.object = "**⚠️ 无条件**"
+            return
+        name = nl_state["target_df"]
+        df = ws.ns.get(name)
+        if not isinstance(df, pd.DataFrame):
+            nl_msg.object = f"**⚠️ `{name}` 不是 DataFrame**"
+            return
+        try:
+            df_new, summary = nl_engine.apply(df, nl_state["conditions"])
+            df_new = _reorder_and_sort(df_new)
+            new_name = ws.put(f"{name}_filtered", df_new)
+            _refresh_vars()
+            lines = [
+                f"- 条件 {i+1}: 通过 {c['passed']} / {c['total']}"
+                + (f" · ⚠️ {c.get('error', '')}" if c.get("error") else "")
+                for i, c in enumerate(summary["conditions"])
+            ]
+            nl_msg.object = (
+                f"**✅ 已应用到 `{new_name}`** · "
+                f"有效 **{summary['passed']}** / {summary['total']} 行\n\n"
+                + "\n".join(lines)
+                + "\n\n下一步可点「📊 查看结果清单」或「📋 仅看通过」。"
+            )
+        except Exception as e:
+            logger.exception("apply conditions failed")
+            nl_msg.object = f"**❌ {type(e).__name__}: {e}**"
+
+    def _on_view(event):
+        """显示 filtered 变量的完整内容（含标记列）。"""
+        name = nl_state["target_df"]
+        if not name:
+            nl_msg.object = "**⚠️ 未指定目标**"
+            return
+        filtered_name = f"{name}_filtered"
+        if filtered_name not in ws.ns:
+            nl_msg.object = "**⚠️ 请先点「应用全部条件」**"
+            return
+
+        df = ws.ns[filtered_name]
+        total = len(df)
+        passed = (int(df["_all_pass"].sum())
+                  if "_all_pass" in df.columns else total)
+
+        nl_msg.object = (
+            f"**✅ 显示 `{filtered_name}` 完整数据** · "
+            f"**{passed} 通过** / {total} 总行\n\n"
+            f"含全部行 + 标记列。在表格里点 `_all_pass` 列头排序，"
+            f"或在 `condN_reason` 列筛选查看剔除原因。"
+        )
+
+        out_value.clear()
+        try:
+            widget = render_value(df.head(500))
+        except Exception as e:
+            logger.exception("render view failed")
+            widget = pn.pane.Markdown(
+                f"**渲染失败**：{type(e).__name__}: {e}"
+            )
+        if widget is not None:
+            out_value.append(widget)
+        out_stdout.object = ""
+        out_error.object = ""
+        result_card.collapsed = False
+
+    def _on_view_passed(event):
+        """只显示 _all_pass=True 的行，去掉标记列。"""
+        name = nl_state["target_df"]
+        if not name:
+            nl_msg.object = "**⚠️ 未指定目标**"
+            return
+        filtered_name = f"{name}_filtered"
+        if filtered_name not in ws.ns:
+            nl_msg.object = "**⚠️ 请先点「应用全部条件」**"
+            return
+
+        df = ws.ns[filtered_name]
+        if "_all_pass" not in df.columns:
+            nl_msg.object = "**⚠️ 该 df 无 _all_pass 列**"
+            return
+
+        passed_df = df[df["_all_pass"]].reset_index(drop=True)
+
+        drop_cols = [c for c in passed_df.columns
+                     if c == "_all_pass"
+                     or (c.startswith("cond")
+                         and (c.endswith("_pass") or c.endswith("_reason")))]
+        display_df = passed_df.drop(columns=drop_cols, errors="ignore")
+
+        passed_name = ws.put(f"{name}_passed", display_df)
+        nl_msg.object = (
+            f"**✅ 仅通过清单已保存为 `{passed_name}`** · "
+            f"{len(display_df)} 行（无标记列）"
+        )
+
+        out_value.clear()
+        try:
+            widget = render_value(display_df.head(500))
+        except Exception as e:
+            widget = pn.pane.Markdown(f"**渲染失败**：{e}")
+        if widget is not None:
+            out_value.append(widget)
+        out_stdout.object = ""
+        out_error.object = ""
+        result_card.collapsed = False
+        _refresh_vars()
+
+    nl_parse_btn.on_click(_on_parse)
+    nl_reload_btn.on_click(_on_reload)
+    nl_apply_btn.on_click(_on_apply)
+    nl_view_btn.on_click(_on_view)
+    nl_view_passed_btn.on_click(_on_view_passed)
+
+    # ============================================================
+    # 回调：SQL
+    # ============================================================
     def _open_sql(event):
         tables = _list_db_tables()
         table_sel = pn.widgets.Select(
@@ -516,7 +842,9 @@ def _build_ui():
 
     sql_btn.on_click(_open_sql)
 
-    # ---------- 上传 ----------
+    # ============================================================
+    # 回调：上传
+    # ============================================================
     def _on_upload(event):
         if not event.new:
             return
@@ -542,7 +870,9 @@ def _build_ui():
 
     upload_input.param.watch(_on_upload, "value")
 
-    # ---------- 缓存 ----------
+    # ============================================================
+    # 回调：缓存
+    # ============================================================
     def _on_cache(event):
         codes = _list_cache_codes()
         if not codes:
@@ -590,7 +920,9 @@ def _build_ui():
 
     cache_btn.on_click(_on_cache)
 
-    # ---------- 拉 scan ----------
+    # ============================================================
+    # 回调：拉取
+    # ============================================================
     def _pull_scan(event):
         from .shared_state import pop_pending
         df = pop_pending(username, "scan_result")
@@ -603,7 +935,6 @@ def _build_ui():
 
     scan_btn.on_click(_pull_scan)
 
-    # ---------- 拉 analysis ----------
     def _pull_ana(event):
         from .shared_state import pop_pending
         payload = pop_pending(username, "analysis_result")
@@ -621,7 +952,9 @@ def _build_ui():
 
     ana_btn.on_click(_pull_ana)
 
-    # ---------- 执行代码 ----------
+    # ============================================================
+    # 回调：执行代码
+    # ============================================================
     def _run_code(event):
         res = execute_code(editor.value, ws)
         _refresh_vars()
@@ -650,7 +983,11 @@ def _build_ui():
 
     clear_btn.on_click(_clear_out)
 
+    # ============================================================
+    # 初始化
+    # ============================================================
     _refresh_vars()
+    _render_conditions()
 
     # ============================================================
     # 布局
@@ -679,6 +1016,7 @@ def _build_ui():
     right = pn.Column(
         pn.pane.HTML(CTRL_ENTER_SCRIPT, width=0, height=0),
         sql_card,
+        nl_card,
         editor_card,
         result_card,
         sizing_mode="stretch_width",
