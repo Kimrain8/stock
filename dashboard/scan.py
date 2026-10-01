@@ -1,6 +1,6 @@
-"""选股扫描页面 — 基于涨幅模式识别"""
 import asyncio
 import logging
+import io
 
 import numpy as np
 import pandas as pd
@@ -10,6 +10,9 @@ from .auth import sessions
 from .config import settings
 from .db_utils import load_scan_data, load_stock_names
 from .data_ops.growth_patterns import find_growth_patterns
+from .shared_state import set_pending_codes
+"""选股扫描页面 — 基于涨幅模式识别"""
+
 
 logger = logging.getLogger("stock2.scan")
 pn.extension("tabulator", sizing_mode="stretch_width")
@@ -66,6 +69,7 @@ def build_scan():
         scan_btn = pn.widgets.Button(
             name="开始扫描", button_type="primary", width=120,
         )
+        
 
         status = pn.pane.Markdown(
             '**准备就绪**。点击"开始扫描"执行。', width=420,
@@ -79,18 +83,27 @@ def build_scan():
             page_size=20,
             sizing_mode="stretch_width",
             height=480,
-            selectable=True,
+            selectable="checkbox",           # ← 只保留这一行
             show_index=False,
             header_filters=True,
-            configuration={"editable": False},   # ← 关键：改用 configuration
+            configuration={"editable": False},
             formatters={"查看": {"type": "html"}},
         )
 
         # 导出：读当前表格内容
+        def _export_csv():
+            """导出当前表格为 CSV。必须返回 BytesIO。"""
+            try:
+                csv_bytes = results_table.value.to_csv(
+                    index=False,
+                ).encode("utf-8-sig")
+                return io.BytesIO(csv_bytes)
+            except Exception as e:
+                logger.exception("export csv failed")
+                return io.BytesIO(b"error")
+
         export_btn = pn.widgets.FileDownload(
-            callback=lambda: results_table.value.to_csv(
-                index=False
-            ).encode("utf-8-sig"),
+            callback=_export_csv,
             filename="scan_results.csv",
             label="导出 CSV",
             button_type="default",
@@ -99,6 +112,72 @@ def build_scan():
 
         # selected_info = pn.pane.Markdown("", width=420)
         selected_info = pn.pane.HTML("", width=520)
+        
+        # ---------- 发送到相似股扫描 ----------
+        send_similar_btn = pn.widgets.Button(
+            name="📤 发送到相似股扫描",
+            button_type="success",
+            width=200,
+        )
+        send_msg = pn.pane.Markdown("", width=400)
+        
+        def _on_send_similar(event):
+            """把勾选（或全部）的代码发送到 /analysis 的相似股扫描。"""
+            try:
+                df = results_table.value
+                if df is None or df.empty:
+                    send_msg.object = "**⚠️ 结果为空**"
+                    return
+
+                sel = results_table.selection
+                if sel:
+                    codes = df.iloc[list(sel)]["ts_code"].tolist()
+                    prefix = "勾选"
+                else:
+                    codes = df["ts_code"].tolist()
+                    prefix = "全部"
+
+                if not codes:
+                    send_msg.object = "**⚠️ 无有效代码**"
+                    return
+
+                codes_str = "\n".join(codes)
+                set_pending_codes(username, codes_str)
+
+                send_msg.object = (
+                    f"**✅ 已发送 {len(codes)} 个代码（{prefix}）**\n\n"
+                    f"切到 `/analysis` → 🎯 相似股扫描，"
+                    f"点「📥 从 /scan 拉取」即可加载。"
+                )
+            except Exception as e:
+                logger.exception("send similar failed")
+                send_msg.object = f"**❌ {type(e).__name__}: {e}**"
+
+        send_similar_btn.on_click(_on_send_similar)
+
+        send_wb_btn = pn.widgets.Button(
+            name="📤 发送到工作台",
+            button_type="success",
+            width=180,
+        )
+        send_wb_msg = pn.pane.Markdown("", width=400)
+
+        def _on_send_wb(event):
+            from .shared_state import set_pending
+            try:
+                df = results_table.value
+                if df is None or df.empty:
+                    send_wb_msg.object = "**⚠️ 结果为空**"
+                    return
+                set_pending(username, "scan_result", df.copy())
+                send_wb_msg.object = (
+                    f"**✅ 已发送 {len(df)} 行到工作台**\n\n"
+                    f"去 `/workbench` → 点「📤 拉取 /scan 结果」"
+                )
+            except Exception as e:
+                send_wb_msg.object = f"**❌ {e}**"
+
+        send_wb_btn.on_click(_on_send_wb)
 
         def _on_row_select(event):
             sel = results_table.selection
@@ -296,36 +375,25 @@ def build_scan():
         scan_btn.on_click(_on_scan)
 
         # ============ 选中行提示 ============
-        def _on_row_click(event):
-            """点击行 → 跳转到 /trend?symbol=xxx。"""
-            row_idx = event.row
-            try:
-                row = results_table.value.iloc[row_idx]
-            except Exception:
-                return
+        # def _on_row_click(event):
+        #     """点击行 → 显示提示。跳转由"查看"列的 HTML 链接实现。"""
+        #     row_idx = event.row
+        #     try:
+        #         row = results_table.value.iloc[row_idx]
+        #     except Exception:
+        #         return
 
-            code = str(row["ts_code"])
-            rule = str(row["rule"])
-            grow = row["growth (%)"]
+        #     code = str(row["ts_code"])
+        #     rule = str(row["rule"])
+        #     grow = row["growth (%)"]
+        #     selected_info.object = (
+        #         f"<b>选中：</b> <code>{code}</code> · "
+        #         f"<span style='color:#888'>{rule} · {grow}%</span> · "
+        #         f"<a href='/trend?symbol={code}' target='_blank' "
+        #         f"style='color:#1976d2'>在趋势页查看 →</a>"
+        #     )
 
-            # 方式 A：原地跳转
-            # pn.state.location.search = f"?symbol={code}"
-            # pn.state.location.reload = True
-
-            # 方式 B：新标签页打开（推荐）
-            url = f"/trend?symbol={code}"
-            js = f"window.open('{url}', '_blank')"
-            pn.state.execute(js) if hasattr(pn.state, "execute") else None
-
-            # 同时更新提示
-            selected_info.object = (
-                f"<b>已打开新标签页：</b> <code>{code}</code> · "
-                f"<span style='color:#888'>{rule} · {grow}%</span> · "
-                f"<a href='{url}' target='_blank' "
-                f"style='color:#1976d2'>如果没打开，点这里</a>"
-            )
-
-        results_table.on_click(_on_row_click)
+        # results_table.on_click(_on_row_click)
 
         # ============ 布局 ============
         return pn.Column(
@@ -340,14 +408,21 @@ def build_scan():
             pn.layout.Divider(),
             pn.pane.Markdown("**扫描规则**"),
             rules_column,
+            # ---- 只有这一处按钮行 ----
             pn.Row(
                 scan_btn,
                 pn.Spacer(width=12),
                 export_btn,
+                pn.Spacer(width=12),
+                send_similar_btn,
+                pn.Spacer(width=20),
+                send_wb_btn,
                 pn.Spacer(width=20),
                 status,
                 sizing_mode="stretch_width",
             ),
+            send_msg,
+            send_wb_msg,
             pn.layout.Divider(),
             pn.pane.Markdown("**扫描结果**"),
             selected_info,

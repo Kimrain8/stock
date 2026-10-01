@@ -327,128 +327,161 @@ from bokeh.models import (
 )
 
 
-def _build_fig2(d: pd.DataFrame, gap: float, x_range: Range1d,
-                on_range_select=None, code_label: str = ""):
+def _build_fig2(d: pd.DataFrame, gap: float, x_range: Range1d,on_range_select=None, code_label: str = ""):
+    """三根柱子从 0 开始。
+    归一化策略：
+        成交量、成交额 → 各自独立归一到 [0, 1]（左轴）
+        换手率         → 保留原始百分比（右轴）
+    这样每根柱子的高度都反映了"该指标在其自身序列中的相对位置"，
+    且图 1、图 2 视觉一致。
+    """
+    from bokeh.models import (
+        PanTool, BoxSelectTool, BoxZoomTool, WheelZoomTool, ResetTool,
+        LinearAxis,
+    )
+
     pan_tool = PanTool(dimensions="width")
     box_sel_tool = BoxSelectTool(dimensions="width")
-    box_zoom_tool = BoxZoomTool(dimensions="width")     # ← 框选放大也只水平
-    wheel_zoom_tool = WheelZoomTool(dimensions="width") # ← 滚轮只缩放 x
+    box_zoom_tool = BoxZoomTool(dimensions="width")
+    wheel_zoom_tool = WheelZoomTool(dimensions="width")
     reset_tool = ResetTool()
+
+    title = f"{code_label} ② 成交量 / 成交额（相对强度）+ 换手率".strip()
 
     fig = figure(
         x_range=x_range, height=380,
-        title=f"{code_label} ② 成交量 / 成交额 / 换手率 + 均价（工具栏切换：手形=拖动，方框=框选）".strip(),
+        title=title,
         x_axis_type="datetime",
         tools=[pan_tool, box_sel_tool, box_zoom_tool, wheel_zoom_tool, reset_tool],
         toolbar_location="above",
     )
     fig.xaxis.axis_label = "日期"
-    fig.yaxis.axis_label = "数值"
+    fig.yaxis.axis_label = "相对强度 (0~1)"
 
-    # ---------- 关键：y 轴固定 [0, y_max × 1.15] ----------
-    y_max = max(
-        float(np.nanmax(d["sum_vol"].to_numpy())) if len(d) else 1.0,
-        float(np.nanmax(d["sum_amt"].to_numpy())) if len(d) else 1.0,
-    )
-    if not np.isfinite(y_max) or y_max <= 0:
-        y_max = 1.0
-    y_hi = y_max * 1.15
-    fig.y_range = Range1d(start=0, end=y_hi, bounds=(0, y_hi))   # ← bounds 锁定
+    # ---------- 归一化基准 ----------
+    max_vol = _norm(d["sum_vol"].to_numpy())
+    max_amt = _norm(d["sum_amt"].to_numpy())
+    max_to = _norm(d["turnover_pct"].to_numpy())
 
-    to_max = float(np.nanmax(d["turnover_pct"].to_numpy())) if len(d) else 0
-    if not np.isfinite(to_max) or to_max <= 0:
-        to_max = 10.0
-    to_hi = to_max * 1.15
+    # ---------- 左轴：0~1 ----------
+    y_hi = 1.05
+    fig.y_range = Range1d(start=0, end=y_hi, bounds=(0, y_hi))
+
+    # ---------- 右轴：换手率 % ----------
+    to_hi = max_to * 1.1
+    if not np.isfinite(to_hi) or to_hi <= 0:
+        to_hi = 10.0
     fig.extra_y_ranges["pct"] = Range1d(start=0, end=to_hi, bounds=(0, to_hi))
-
     fig.add_layout(
         LinearAxis(y_range_name="pct", axis_label="换手率（%）"), "right"
     )
 
-    # ---------- 3. 数据准备（省略，与之前相同） ----------
     bar_w_ms = gap * 86400000 * 0.25
     offset_ms = gap * 86400000 * 0.30
 
+    # ---------- 数据准备 ----------
     xs_vol, xs_amt, xs_to = [], [], []
-    vals_vol, vals_amt, vals_to = [], [], []
-    dates, date_mins, avg_prices = [], [], []
+    v_norm, a_norm = [], []              # 归一化值（左轴）
+    t_raw = []                            # 换手率原始值（右轴）
+    dates, date_mins = [], []
+    v_raw_list, a_raw_list = [], []      # hover 用
 
-    ap_arr = d["avg_price"].to_numpy(dtype=np.float64)
-    finite = ap_arr[np.isfinite(ap_arr)]
-    ap_min = float(finite.min()) if len(finite) else 0.0
-    ap_max = float(finite.max()) if len(finite) else 1.0
-    ap_span = ap_max - ap_min if ap_max > ap_min else 1.0
-    avg_scaled = 0.15 * y_max + ((ap_arr - ap_min) / ap_span) * 0.70 * y_max
-
-    for i, (_, row) in enumerate(d.iterrows()):
+    for _, row in d.iterrows():
         date_i = row["date"]
+
+        v_raw = row["sum_vol"] if np.isfinite(row["sum_vol"]) else 0.0
+        a_raw = row["sum_amt"] if np.isfinite(row["sum_amt"]) else 0.0
+        t_raw_v = row["turnover_pct"] if np.isfinite(row["turnover_pct"]) else 0.0
+
+        v = v_raw / max_vol if max_vol > 0 else 0.0
+        a = a_raw / max_amt if max_amt > 0 else 0.0
+
         xs_vol.append(date_i - pd.Timedelta(milliseconds=offset_ms))
         xs_amt.append(date_i)
         xs_to.append(date_i + pd.Timedelta(milliseconds=offset_ms))
-        vals_vol.append(row["sum_vol"] if np.isfinite(row["sum_vol"]) else 0)
-        vals_amt.append(row["sum_amt"] if np.isfinite(row["sum_amt"]) else 0)
-        vals_to.append(row["turnover_pct"] if np.isfinite(row["turnover_pct"]) else 0)
+        v_norm.append(v)
+        a_norm.append(a)
+        t_raw.append(t_raw_v)
+        v_raw_list.append(v_raw)
+        a_raw_list.append(a_raw)
         dates.append(date_i)
         date_mins.append(row["date_min"])
-        avg_prices.append(row["avg_price"])
 
-    src = ColumnDataSource(dict(
-        x_vol=xs_vol, y_vol=vals_vol,
-        x_amt=xs_amt, y_amt=vals_amt,
-        x_to=xs_to, y_to=vals_to,
-        x_line=dates, y_line=avg_scaled.tolist(),
-        date=dates, date_min=date_mins,
-        sum_vol=vals_vol, sum_amt=vals_amt,
-        turnover=vals_to, avg_price=avg_prices,
+    src_vol = ColumnDataSource(dict(
+        x=xs_vol, y=v_norm, y_raw=v_raw_list, date=dates, date_min=date_mins,
+    ))
+    src_amt = ColumnDataSource(dict(
+        x=xs_amt, y=a_norm, y_raw=a_raw_list, date=dates, date_min=date_mins,
+    ))
+    src_to = ColumnDataSource(dict(
+        x=xs_to, y=t_raw, date=dates, date_min=date_mins,
     ))
 
-    r_vol = fig.vbar(x="x_vol", top="y_vol", bottom=0, width=bar_w_ms,
-                     source=src, color="#1e88e5", alpha=0.6,
-                     legend_label="成交量（手）")
-    r_amt = fig.vbar(x="x_amt", top="y_amt", bottom=0, width=bar_w_ms,
-                     source=src, color="#43a047", alpha=0.6,
-                     legend_label="成交额（千元）")
-    r_to = fig.vbar(x="x_to", top="y_to", bottom=0, width=bar_w_ms,
-                    source=src, color="#fb8c00", alpha=0.6,
-                    y_range_name="pct", legend_label="换手率（%）")
-    avg_line = fig.line(
-        x="x_line", y="y_line", source=src,
-        color="#0d47a1", line_width=2.5,
-        legend_label="均价（示意）",
+    # ---------- 柱 ----------
+    r_vol = fig.vbar(
+        x="x", top="y", bottom=0, width=bar_w_ms,
+        source=src_vol, color="#1e88e5", alpha=0.75,
+        legend_label="成交量（相对强度）",
+    )
+    r_amt = fig.vbar(
+        x="x", top="y", bottom=0, width=bar_w_ms,
+        source=src_amt, color="#43a047", alpha=0.75,
+        legend_label="成交额（相对强度）",
+    )
+    r_to = fig.vbar(
+        x="x", top="y", bottom=0, width=bar_w_ms,
+        source=src_to, color="#fb8c00", alpha=0.75,
+        y_range_name="pct",
+        legend_label="换手率（%）",
     )
 
-    fig.add_tools(HoverTool(
-        renderers=[r_vol, r_amt, r_to, avg_line],
-        tooltips=[
-            ("当前日期", "@date{%F}"),
-            ("起始日期", "@date_min{%F}"),
-            ("成交量",   "@sum_vol{0,0} 手"),
-            ("成交额",   "@sum_amt{0,0} 千元"),
-            ("均价",     "@avg_price{0.000} 元"),
-            ("换手率",   "@turnover{0.00} %"),
-        ],
-        formatters={"@date": "datetime", "@date_min": "datetime"},
-    ))
+    # ---------- Hover ----------
+    fig.add_tools(
+        HoverTool(
+            renderers=[r_vol],
+            tooltips=[
+                ("当前日期", "@date{%F}"),
+                ("起始日期", "@date_min{%F}"),
+                ("成交量",   "@y_raw{0,0} 手"),
+            ],
+            formatters={"@date": "datetime", "@date_min": "datetime"},
+        ),
+        HoverTool(
+            renderers=[r_amt],
+            tooltips=[
+                ("当前日期", "@date{%F}"),
+                ("起始日期", "@date_min{%F}"),
+                ("成交额",   "@y_raw{0,0} 千元"),
+            ],
+            formatters={"@date": "datetime", "@date_min": "datetime"},
+        ),
+        HoverTool(
+            renderers=[r_to],
+            tooltips=[
+                ("当前日期", "@date{%F}"),
+                ("起始日期", "@date_min{%F}"),
+                ("换手率",   "@y{0.00} %"),
+            ],
+            formatters={"@date": "datetime", "@date_min": "datetime"},
+        ),
+    )
 
-        # ---------- 4. 隐藏的 picker 层（框选必须有可选择对象） ----------
+    # ---------- 隐藏 picker 层（框选用） ----------
     src_picker = ColumnDataSource(dict(
         x=dates,
-        y=[y_max * 0.5] * len(dates),
+        y=[0.5] * len(dates),
         date=dates,
     ))
     picker = fig.scatter(
         x="x", y="y", source=src_picker,
-        size=1,
-        fill_alpha=0.0, line_alpha=0.0,
+        size=1, fill_alpha=0.0, line_alpha=0.0,
         fill_color="#000000", line_color="#000000",
         name="picker",
     )
     box_sel_tool.renderers = [picker]
-
-    # ---------- 5. 默认左键拖动 ----------
     fig.toolbar.active_drag = pan_tool
 
-    # ---------- 6. 框选事件监听 ----------
+    # ---------- 框选回调 ----------
     if on_range_select is not None:
         def _on_box_select_event(event):
             geom = event.geometry
@@ -462,7 +495,8 @@ def _build_fig2(d: pd.DataFrame, gap: float, x_range: Range1d,
             days = int(round(span_ms / 86400000.0))
             if days < 1:
                 return
-            logger.info("box select event | span_ms=%.0f | days=%d", span_ms, days)
+            logger.info("box select event | span_ms=%.0f | days=%d",
+                        span_ms, days)
             on_range_select(days)
             try:
                 src_picker.selected.indices = []

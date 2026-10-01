@@ -16,6 +16,8 @@ from .explorer import build_explorer
 from .trend import build_trend
 from .scan import build_scan
 from .analysis_page import build_analysis_page
+from .data_explorer import build_data_explorer
+from .data_workbench import build_data_workbench
 
 setup_logging()
 logger = logging.getLogger("stock2.server")
@@ -150,8 +152,8 @@ HOME_HTML = Template("""<!doctype html>
   <p>欢迎，$user。请选择要进入的模块：</p>
   <div class="grid">
     <a class="card" href="$explorer">
-      <h2>📊 数据探索器</h2>
-      <p>交互式 Pandas 表达式执行与 K 线可视化</p>
+      <h2>📈 K线展示</h2>
+      <p>K 线 + 成交量 + 换手率交互分析</p>
     </a>
     <a class="card" href="$api_docs">
       <h2>🔌 API 文档</h2>
@@ -172,6 +174,14 @@ HOME_HTML = Template("""<!doctype html>
     <a class="card" href="$analysis">
       <h2>🧠 智能分析</h2>
       <p>4 Agent 协同 · 规则闭环学习</p>
+    </a>
+    <a class="card" href="$data_explorer">
+      <h2>📊 数据探索器</h2>
+      <p>SQL 查询 · 表格/图形展示 · 导出</p>
+    </a>
+    <a class="card" href="$workbench">
+      <h2>🧪 数据工作台</h2>
+      <p>IPython 风格 · 5 个数据源 · 代码操作 DataFrame</p>
     </a>
   </div>
   <script>
@@ -196,6 +206,8 @@ async def home(request: Request):
         trend=getattr(settings, "TREND_PATH", "/trend"),
         scan=settings.SCAN_PATH,
         analysis=settings.ANALYSIS_PATH,
+        data_explorer=settings.DATA_EXPLORER_PATH,   # ← 新增
+        workbench=settings.WORKBENCH_PATH,
         api_docs=f"{settings.REST_API_PREFIX}/docs",
         ws_path=settings.WS_API_PATH,
     )
@@ -246,12 +258,16 @@ explorer_app = build_explorer()
 trend_app = build_trend()
 scan_app = build_scan()
 analysis_app = build_analysis_page()
+data_explorer_app = build_data_explorer()   # ← 新增
+workbench_app = build_data_workbench()
 add_applications(
     {
         settings.EXPLORER_PATH: explorer_app,
         settings.TREND_PATH: trend_app,
         settings.SCAN_PATH: scan_app,
         settings.ANALYSIS_PATH: analysis_app,
+        settings.DATA_EXPLORER_PATH: data_explorer_app,   # ← 新增
+        settings.WORKBENCH_PATH: workbench_app,
     }, 
     app=app
 )

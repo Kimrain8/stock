@@ -34,6 +34,9 @@ class Settings:
         self.TREND_PATH = os.getenv("APP_TREND_PATH", "/trend")
         self.SCAN_PATH = os.getenv("APP_SCAN_PATH", "/scan")
         self.ANALYSIS_PATH = os.getenv("APP_ANALYSIS_PATH", "/analysis")
+        self.DATA_EXPLORER_PATH = os.getenv("APP_DATA_EXPLORER_PATH", "/data-explorer")
+        self.WORKBENCH_PATH = os.getenv("APP_WORKBENCH_PATH", "/workbench")
+        
         self.HOME_PATH = "/"
         self.LOGIN_PATH = "/login"
         self.LOGOUT_PATH = "/logout"
