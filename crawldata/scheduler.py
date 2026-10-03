@@ -17,7 +17,12 @@ scheduler.py —— 生产级轻量调度器
   - 通知钩子 (on_success/on_fail/on_retry/on_recover/on_skip)
   - 状态持久化 (<cfg>.state.json)
   - 交互命令: status/tasks/run/pause/resume/update/cancel/help
-
+  - params 支持动态表达式:
+      "params": {"k": "v"}                          静态字典
+      "params": "module.func(a=1, b='x')"           模块函数，返回 dict
+      "params": "Class.method(a=1)"                 类方法，返回 dict
+      "params": "instance.method(a=1)"              实例方法，返回 dict
+      condition 内的 params 也支持同样语法
 用法:
   python scheduler.py <配置文件>
   python scheduler.py continue <配置文件>     # 从上次失败处续跑
@@ -25,6 +30,8 @@ scheduler.py —— 生产级轻量调度器
 from __future__ import annotations
 
 import asyncio
+# >>> 改动 1: 引入 ast 用于解析 params 表达式
+import ast
 import importlib
 import inspect
 import json
@@ -36,7 +43,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 log = logging.getLogger("scheduler")
 
@@ -229,28 +236,108 @@ def _parse_backoff(raw) -> Optional[Any]:
     raise ValueError(f"retry_backoff 非法: {raw!r}")
 
 # =========================================================================== #
-# >>> 改动 1: 新增 condition 字典解析器
+# >>> 改动 2: params 表达式解析（字符串形式）
+# =========================================================================== #
+def _parse_params_expr(expr: str) -> Tuple[List[str], Dict[str, Any]]:
+    """
+    解析形如 "module.func(a=1, b='x')" / "Class.method(a=1)" / "instance.method(a=1)"
+    的表达式。返回 (path_list, kwargs)。
+
+    path_list 例：
+      "module.func(...)"            -> ["module", "func"]
+      "pkg.mod.Class.method(...)"   -> ["pkg", "mod", "Class", "method"]
+      "instance.method(...)"        -> ["instance", "method"]
+
+    约束：
+      - 只接受关键字参数
+      - 参数值必须是字面量（字符串/数字/布尔/None/列表/字典）
+    """
+    if not isinstance(expr, str):
+        raise ValueError(f"params 表达式必须是字符串: {expr!r}")
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError as e:
+        raise ValueError(f"params 表达式语法错误: {expr!r} ({e})")
+    if not isinstance(tree.body, ast.Call):
+        raise ValueError(f"params 表达式必须是函数调用: {expr!r}")
+
+    call = tree.body
+    if call.args:
+        raise ValueError(f"params 表达式不支持位置参数: {expr!r}")
+
+    # 展开属性链
+    path: List[str] = []
+    node = call.func
+    while isinstance(node, ast.Attribute):
+        path.insert(0, node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        raise ValueError(f"params 表达式不支持的调用形式: {expr!r}")
+    path.insert(0, node.id)
+
+    if len(path) < 2:
+        raise ValueError(
+            f"params 表达式至少需要 '模块.函数(...)' / '类.方法(...)' / "
+            f"'实例.方法(...)' 形式: {expr!r}")
+
+    kwargs: Dict[str, Any] = {}
+    for kw in call.keywords:
+        if kw.arg is None:
+            raise ValueError(f"params 表达式不支持 **kwargs 展开: {expr!r}")
+        try:
+            kwargs[kw.arg] = ast.literal_eval(kw.value)
+        except Exception:
+            raise ValueError(
+                f"params 表达式的参数值必须是字面量（字符串/数字/列表/字典/布尔/None）: "
+                f"{kw.arg}={ast.unparse(kw.value)}")
+
+    return path, kwargs
+
+
+def _parse_params_field(raw, task_name: str) -> Tuple[Dict[str, Any], Optional[str]]:
+    """
+    统一解析 params 字段：
+      - None / 缺省      -> ({}, None)
+      - dict            -> (dict, None)
+      - str (函数调用)   -> ({}, expr)   # 运行时求值
+    """
+    if raw is None:
+        return {}, None
+    if isinstance(raw, str):
+        expr = raw.strip()
+        if not expr:
+            return {}, None
+        _parse_params_expr(expr)          # 提前校验语法
+        return {}, expr
+    if isinstance(raw, dict):
+        return dict(raw), None
+    raise ValueError(f"[{task_name}] params 类型非法: {type(raw).__name__}")
+
+
+# =========================================================================== #
+# >>> 改动 3: condition 解析器升级为返回 (spec, params_dict, params_expr)
 # =========================================================================== #
 def _parse_condition(raw, task_name: str):
     """
-    解析 condition 字段，返回 (spec, params) 或 (None, {})。
+    解析 condition 字段，返回 (spec, params_dict, params_expr)。
 
-    支持三种输入:
-      - None / 缺省           -> (None, {})
-      - "模块:函数" / "实例:方法"  -> (spec, {})           （兼容字符串简写）
-      - {"func": "...", "params": {...}}
+    支持:
+      - None / 缺省                -> (None, {}, None)
+      - "模块:函数" / "实例:方法"   -> (spec, {}, None)     （字符串简写）
+      - {"func": "...", "params": {...}}        -> (spec, dict, None)
+      - {"func": "...", "params": "expr(...)"}  -> (spec, {}, expr)
     """
     if raw is None:
-        return None, {}
+        return None, {}, None
     if isinstance(raw, str):
         spec = raw.strip()
         if not spec:
-            return None, {}
+            return None, {}, None
         if ":" not in spec:
             raise ValueError(
                 f"[{task_name}] condition 必须形如 '模块:函数' 或 '实例:方法'，"
                 f"收到 {spec!r}")
-        return spec, {}
+        return spec, {}, None
     if isinstance(raw, dict):
         spec = raw.get("func")
         if not spec:
@@ -260,8 +347,10 @@ def _parse_condition(raw, task_name: str):
             raise ValueError(
                 f"[{task_name}] condition.func 必须形如 '模块:函数' 或 '实例:方法'，"
                 f"收到 {spec!r}")
-        params = dict(raw.get("params") or {})
-        return spec, params
+        raw_params = raw.get("params") or {}
+        params, params_expr = _parse_params_field(
+            raw_params, f"{task_name}.condition")
+        return spec, params, params_expr
     raise ValueError(f"[{task_name}] condition 类型非法: {raw!r}")
 
 # =========================================================================== #
@@ -392,11 +481,14 @@ class Task:
     func_spec: str
     interval: Optional[str]
     next_run: Optional[datetime]
+    # >>> 改动 4: 新增 params_expr / condition_params_expr
     params: Dict[str, Any] = field(default_factory=dict)
+    params_expr: Optional[str] = None
     deps_groups: List[List[str]] = field(default_factory=list)
     # >>> 改动 2: 新增 condition 字段
     condition_spec: Optional[str] = None
     condition_params: Dict[str, Any] = field(default_factory=dict)
+    condition_params_expr: Optional[str] = None
     validate: int = 1
     timeout: Optional[float] = None
     retry: int = 0
@@ -603,36 +695,6 @@ class Scheduler:
             os.replace(tmp, self._state_file)
         except Exception:
             log.exception("保存状态失败")
-    # def _save_state(self, force: bool = False) -> None:
-    #     if not self._state_file:
-    #         return
-    #     now = time.time()
-    #     if not force and now - self._last_save_time < _SAVE_MIN_INTERVAL:
-    #         self._save_pending = True
-    #         return
-    #     with self._cv:
-    #         snapshot = {
-    #             name: {
-    #                 "last_status": t.last_status,
-    #                 "prev_status": t.prev_status,
-    #                 "last_run": t.last_run.isoformat() if t.last_run else None,
-    #                 "last_error": t.last_error,
-    #                 "run_count": t.run_count,
-    #                 "fail_count": t.fail_count,
-    #             }
-    #             for name, t in self._tasks.items()
-    #         }
-    #     try:
-    #         tmp = self._state_file + ".tmp"
-    #         with open(tmp, "w", encoding="utf-8") as f:
-    #             json.dump(
-    #                 {"tasks": snapshot, "saved_at": datetime.now().isoformat()},
-    #                 f, ensure_ascii=False, indent=2)
-    #         os.replace(tmp, self._state_file)
-    #         self._last_save_time = now
-    #         self._save_pending = False
-    #     except Exception:
-    #         log.exception("保存状态失败")
 
     def _reload_config(self) -> None:
         if not self._config_path:
@@ -685,11 +747,13 @@ class Scheduler:
                         t = self._tasks[name]
                         nr = (t.next_run.strftime("%Y-%m-%d %H:%M:%S")
                               if t.next_run else "无")
-                        # >>> 改动 3: 日志里带上 condition
+                        pmark = "动态" if t.params_expr else "静态"
+                        cnd = t.condition_spec or "-"
+                        cpm = "动态" if t.condition_params_expr else "静态"
                         log.info("[%s] 新增 validate=%s interval=%s retry=%d "
-                                 "condition=%s next=%s",
+                                 "params=%s condition=%s cond.params=%s next=%s",
                                  name, t.validate, t.interval or "(仅一次)",
-                                 t.retry, t.condition_spec or "-", nr)
+                                 t.retry, pmark, cnd, cpm, nr)
                     except Exception:
                         log.exception("[%s] 创建失败", name)
 
@@ -698,6 +762,7 @@ class Scheduler:
         # 循环依赖检测
         self._check_dependency_cycles()
 
+    # >>> 改动 5: _build_task 使用 _parse_params_field 解析 params
     def _build_task(self, spec: Dict[str, Any]) -> Task:
         name = spec["name"]
         func_spec = spec["func"]
@@ -711,8 +776,12 @@ class Scheduler:
         if retry < 0:
             raise ValueError(f"[{name}] retry 必须 >= 0")
         retry_backoff = _parse_backoff(spec.get("retry_backoff"))
-        # 加入task的前置条件
-        condition_spec, condition_params = _parse_condition(spec.get("condition"), name)
+        # 加入task的前置条件 # params：字典 / 字符串表达式
+        params, params_expr = _parse_params_field(spec.get("params"), name)
+
+        # condition：{"func": ..., "params": 字典 / 字符串}
+        condition_spec, condition_params, condition_params_expr = _parse_condition(
+            spec.get("condition"), name)
 
         if interval == EVENT:
             next_run = None
@@ -729,10 +798,12 @@ class Scheduler:
             func_spec=func_spec,
             interval=interval,
             next_run=next_run,
-            params=dict(spec.get("params", {})),
+            params=params,
+            params_expr=params_expr,
             deps_groups=deps_groups,
-            condition_spec=condition_spec,          # >>> 新增
-            condition_params=condition_params,      # >>> 新增
+            condition_spec=condition_spec,
+            condition_params=condition_params,
+            condition_params_expr=condition_params_expr,
             validate=int(spec.get("validate", 1)),
             timeout=spec.get("timeout"),
             retry=retry,
@@ -740,6 +811,7 @@ class Scheduler:
             start_at_raw=start_raw,
         )
 
+    # >>> 改动 6: _update_task 也走同一套解析
     def _update_task(self, t: Task, spec: Dict[str, Any]) -> None:
         note = "（运行中）" if t.running else ""
 
@@ -748,27 +820,31 @@ class Scheduler:
             t.func_spec = new_func_spec
             log.info("[%s] func 更新为 %s %s", t.name, new_func_spec, note)
 
-        new_params = dict(spec.get("params", {}))
-        if new_params != t.params:
+        new_params, new_params_expr = _parse_params_field(
+            spec.get("params"), t.name)
+        if new_params != t.params or new_params_expr != t.params_expr:
             t.params = new_params
-            log.info("[%s] 参数更新 %s", t.name, note)
+            t.params_expr = new_params_expr
+            mark = "动态" if new_params_expr else "静态"
+            log.info("[%s] params 更新（%s）%s", t.name, mark, note)
 
         new_deps = _parse_deps(spec.get("deps", []))
         if new_deps != t.deps_groups:
             t.deps_groups = new_deps
             log.info("[%s] 依赖更新 %s", t.name, note)
         # >>> 改动 5: 处理 condition 变更
-        new_cond_spec, new_cond_params = _parse_condition(
+        new_cond_spec, new_cond_params, new_cond_params_expr = _parse_condition(
             spec.get("condition"), t.name)
         if new_cond_spec != t.condition_spec:
             t.condition_spec = new_cond_spec
             log.info("[%s] condition 更新为 %s %s",
                      t.name, new_cond_spec, note)
-        if new_cond_params != t.condition_params:
+        if (new_cond_params != t.condition_params
+                or new_cond_params_expr != t.condition_params_expr):
             t.condition_params = new_cond_params
-            if new_cond_spec == t.condition_spec and new_cond_params:
-                log.info("[%s] condition.params 更新为 %s %s",
-                         t.name, new_cond_params, note)
+            t.condition_params_expr = new_cond_params_expr
+            mark = "动态" if new_cond_params_expr else "静态"
+            log.info("[%s] condition.params 更新（%s）%s", t.name, mark, note)
 
         new_validate = int(spec.get("validate", 1))
         was = t.validate
@@ -865,6 +941,7 @@ class Scheduler:
         with self._cv:
             if name in self._tasks:
                 self._tasks[name].params = dict(params)
+                self._tasks[name].params_expr = None
                 self._cv.notify_all()
 
     def set_enabled(self, name: str, enabled: bool) -> bool:
@@ -1236,8 +1313,67 @@ class Scheduler:
         fn = _load_module_attr(spec)
         return fn, None
     # ================================================================== #
-    # >>> 改动 7: 新增 _check_condition —— 执行 condition 并返回 bool
+    # >>> 改动 7: params 表达式求值
     # ================================================================== #
+    def _resolve_params_expr(self, expr: str, batch_ctx: Dict[str, Any],
+                             ctx: str) -> Dict[str, Any]:
+        """
+        求值 params 表达式，返回 dict。
+        支持:
+          "module.func(a=1, b='x')"        模块级函数
+          "module.Class.method(a=1)"       类方法（含静态）
+          "instance.method(a=1)"           实例方法（在 instances 中已注册别名）
+        每次调用都重新求值（允许动态值）。
+        """
+        path, kwargs = _parse_params_expr(expr)
+        head, attrs = path[0], path[1:]
+        cleanup = None
+        try:
+            if self._instances.has(head):
+                spec_obj = self._instances.get_spec(head)
+                obj = self._instances.get(head, batch_ctx)
+                if spec_obj.lifetime == "call":
+                    cleanup = (obj, head)
+            else:
+                try:
+                    obj = importlib.import_module(head)
+                except ImportError as e:
+                    raise ValueError(
+                        f"[{ctx}] params 表达式无法解析 {head!r}："
+                        f"既不是已注册实例，也不是可导入模块 ({e})")
+            for attr in attrs:
+                obj = getattr(obj, attr)
+            if not callable(obj):
+                raise TypeError(
+                    f"[{ctx}] params 表达式 {expr!r} 的最终目标不是可调用对象")
+            result = obj(**kwargs)
+            if not isinstance(result, dict):
+                raise TypeError(
+                    f"[{ctx}] params 表达式 {expr!r} 必须返回 dict，"
+                    f"实际返回 {type(result).__name__}")
+            return result
+        finally:
+            if cleanup is not None:
+                inst, iname = cleanup
+                try:
+                    self._instances.close_one(iname, inst)
+                except Exception:
+                    log.exception("[%s] 关闭 params call 实例 [%s] 失败", ctx, iname)
+
+    def _resolve_actual_params(self,
+                               params_dict: Dict[str, Any],
+                               params_expr: Optional[str],
+                               batch_ctx: Dict[str, Any],
+                               ctx: str) -> Dict[str, Any]:
+        """统一入口：有表达式就求值，否则返回字典的拷贝。"""
+        if params_expr:
+            return self._resolve_params_expr(params_expr, batch_ctx, ctx)
+        return dict(params_dict)
+
+    # ================================================================== #
+    # condition 检查
+    # ================================================================== #
+    # >>> 改动 8: _check_condition 支持动态 params
     def _check_condition(self, task: Task, batch_ctx: Dict[str, Any]) -> bool:
         """
         执行 condition。
@@ -1256,8 +1392,17 @@ class Scheduler:
                               task.name, task.condition_spec)
                 return False
 
+            # 解析 condition 的 params（支持动态表达式）
             try:
-                raw = self._execute(task, fn, task.condition_params)
+                actual_params = self._resolve_actual_params(
+                    task.condition_params, task.condition_params_expr,
+                    batch_ctx, ctx=f"task:{task.name}.condition.params")
+            except Exception:
+                log.exception("[%s] condition.params 解析失败", task.name)
+                return False
+
+            try:
+                raw = self._execute(task, fn, actual_params)
             except Exception:
                 log.exception("[%s] condition 执行失败: %s",
                               task.name, task.condition_spec)
@@ -1273,7 +1418,7 @@ class Scheduler:
                     log.exception("关闭 condition call 实例 [%s] 失败", iname)
 
     # ================================================================== #
-    # 执行单个任务
+    # 执行单个任务 # >>> 改动 9: _run_task 在调用 func 前解析 params
     # ================================================================== #
     def _run_task(self, task: Task, batch_ctx: Dict[str, Any]) -> str:
         original_scheduled = task.next_run
@@ -1287,26 +1432,39 @@ class Scheduler:
             if blocked:
                 log.warning("[%s] 跳过执行，依赖未满足: %s", task.name, blocked)
                 return self._finalize(task, "skipped", original_scheduled)
-            # >>> 改动 8: condition 检查（依赖通过之后、func 之前）
+
+            # ---- 2. condition 检查 ----
             if task.condition_spec:
                 if not self._check_condition(task, batch_ctx):
                     log.info("[%s] condition 未通过，跳过执行: %s",
                              task.name, task.condition_spec)
                     return self._finalize(task, "skipped", original_scheduled)
-            # ---- 2. 解析 func ----
+
+            # ---- 3. 解析 func ----
             try:
                 func, cleanup = self._resolve_task_func(task, batch_ctx)
             except Exception as e:
                 log.exception("[%s] 解析 func 失败: %s", task.name, task.func_spec)
                 return self._on_failure(task, e, original_scheduled)
-            # ---- 3. 执行 func ----
+
+            # ---- 4. 解析 params（支持动态表达式）----
+            try:
+                actual_params = self._resolve_actual_params(
+                    task.params, task.params_expr,
+                    batch_ctx, ctx=f"task:{task.name}.params")
+            except Exception as e:
+                log.exception("[%s] params 解析失败: %r",
+                              task.name, task.params_expr)
+                return self._on_failure(task, e, original_scheduled)
+
+            # ---- 5. 执行 func ----
             attempt = task.retries_done + 1
             total = task.retry + 1
             log.info("[%s] 开始执行 func=%s params=%s (第 %d/%d 次)",
-                     task.name, task.func_spec, task.params, attempt, total)
+                     task.name, task.func_spec, actual_params, attempt, total)
 
             try:
-                self._execute(task, func, task.params)
+                self._execute(task, func, actual_params)
             except Exception as e:
                 log.exception("[%s] 执行失败", task.name)
                 return self._on_failure(task, e, original_scheduled)
@@ -1419,6 +1577,7 @@ class Scheduler:
                     # >>> 改动 10: 展示 condition
                     "condition": t.condition_spec,
                     "condition_params": dict(t.condition_params),
+                    "condition_params_expr": t.condition_params_expr,
                     "interval": (t.interval if t.interval else
                                  ("事件驱动" if t.interval == EVENT else "(仅一次)")),
                     "retry": t.retry,
@@ -1434,30 +1593,32 @@ class Scheduler:
                     "fail": t.fail_count,
                     "deps_groups": [list(g) for g in t.deps_groups],
                     "params": dict(t.params),
+                    "params_expr": t.params_expr,
                 }
                 for name, t in self._tasks.items()
             }
 
     def print_status(self) -> None:
-        print("-" * 150)
+        print("-" * 160)
         print(f"{'任务':<14}{'有效':<5}{'运行':<5}{'状态':<10}{'间隔':<10}"
               f"{'重试':<5}{'下次运行':<21}{'剩余(s)':<10}{'成功':<6}{'失败':<6}"
-              f"{'condition':<22}{'依赖':<26}参数")
-        print("-" * 150)
+              f"{'params':<18}{'condition':<22}{'依赖':<22}参数")
+        print("-" * 160)
         for name, s in self.status().items():
             deps_str = " or ".join("(" + "+".join(g) + ")" for g in s["deps_groups"]) or "-"
-            if len(deps_str) > 24:
-                deps_str = deps_str[:21] + "..."
+            if len(deps_str) > 20:
+                deps_str = deps_str[:17] + "..."
             cond = s["condition"] or "-"
             if len(cond) > 20:
                 cond = cond[:17] + "..."
+            pmark = "动态表达式" if s["params_expr"] else "静态"
             print(f"{name:<14}{s['validate']:<5}"
                   f"{'★' if s['running'] else '':<5}"
                   f"{s['last_status']:<10}{s['interval']:<10}"
                   f"{s['retry']:<5}{s['next_run']:<21}"
                   f"{str(s['in_seconds']):<10}{s['ok']:<6}{s['fail']:<6}"
-                  f"{cond:<22}{deps_str:<26}{s['params']}")
-        print("-" * 150)
+                  f"{pmark:<18}{cond:<22}{deps_str:<22}{s['params']}")
+        print("-" * 160)
 
 
 # =========================================================================== #
@@ -1500,7 +1661,7 @@ def sch_main():
         config_path = args[0]
 
     _ = os.path.dirname(config_path)
-    setup_logging(log_file=os.path.join(_,"scheduler.log"))
+    setup_logging(log_file=os.path.join(_, "scheduler.log"))
 
     sch = Scheduler()
     _GLOBAL_SCHEDULER = sch

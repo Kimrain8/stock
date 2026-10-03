@@ -35,8 +35,9 @@
 	  "retry": 3,
 	  "retry_backoff": [1, 3, 5],
 	  "deps": [["a","b"], "c"],
-      "params": { "key": "value" }
+      "params": { "key": "value" } | "conditionFunc.get_share_float_params()"
     },
+
     {
       "name": "batch_task_b",
       "func": "ts_batch:fetch_daily",

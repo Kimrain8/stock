@@ -498,16 +498,7 @@ class Myts():
     def get_max_trade_date(self):
         df = self.db.qry2df(f"""select max(trade_date) as trade_date from ts_stock_daily_his AS ttd""") 
         return pd.Timestamp.now().date() if pd.isna(df.iloc[0,0]) else pd.to_datetime(df.iloc[0,0]).date()
-    def lookUpColName(self,df):
-        """把字段映射为可以理解的短备注"""
-        cols = self.db.qry2df(f"""select distinct cols.COLUMN_NAME, \
-            SUBSTRING_INDEX(cols.COLUMN_COMMENT,'~',1) as COLUMN_COMMENT \
-            from information_schema.`COLUMNS` as cols \
-            where cols.TABLE_SCHEMA = 'jhd'""")
-        cols["COLUMN_COMMENT"] = cols["COLUMN_COMMENT"].apply(lambda x: x.decode('utf-8') if isinstance(x, bytes) else x)
-        colmap = cols['COLUMN_COMMENT']
-        colmap.index = cols['COLUMN_NAME']
-        return df.columns.map(colmap)
+    
     def get_trade_calendar(self,startdate=None,enddate=None):
         """获取交易日历，一小时只能访问一次,日期格式：%Y%m%d"""
         if startdate is None : startdate=self.max_trade_date
@@ -593,6 +584,39 @@ class Myts():
         print('完成数据插入')
         return 0
 
+    def get_share_float(self,start_date_str=None,end_date_str=None):
+            """
+            获取解禁日期 大于等于start_date_str 小于等于end_date_str的所有解禁数据
+            如果start_date_str 为空，那么等于max_trade_date；end_date_str为空，那么就等于当前日期
+            Args:
+                start_date_str (str): 开始日期字符串，格式 'YYYY-MM-DD'。插入的日期是这个日期的下一个交易日期
+                end_date_str :结束日期字符串，格式YYYY-MM-DD
+                force: 1表示强制更新从startdate 到enddate的交易数据
+            Returns:
+                list: 交易日期字符串列表，格式 'YYYY-MM-DD'。
+            """
+            # current_date = pd.to_datetime(start_date_str)
+            # current_date_str = current_date.strftime("%Y-%m-%d")
+            # tody = pd.to_datetime(date.today() )
+            # tody_str = tody.strftime("%Y-%m-%d")
+            if start_date_str is None: 
+                start_date_str = self.max_trade_date.strftime("%Y%m%d")
+            else:
+                start_date_str = pd.to_datetime(start_date_str).date().strftime("%Y%m%d")
+                
+            if end_date_str is None: 
+                end_date_str = pd.Timestamp.now().strftime("%Y%m%d")
+            else:
+                end_date_str = pd.to_datetime(end_date_str).date().strftime("%Y%m%d")
+
+            df = self.pro.share_float(start_date=start_date_str,end_date=end_date_str)
+            df.rename(columns={"ann_date":"float_ann_date","holder_name":"gdmc"},inplace=True)
+            df['float_ann_date'] = pd.to_datetime(df['float_ann_date'],format='%Y%m%d').dt.date
+            df['float_date'] = pd.to_datetime(df['float_date'],format='%Y%m%d').dt.date
+            if len(df) >= 1:
+                self.db.bulkInsUpd(table='ts_share_float',df=df)
+            return 0
+
 def mySearchDf(df, target, regex=False):
     """
     在整个 DataFrame 中查找 target。
@@ -675,17 +699,17 @@ def myJson2txt(jfile,txtfile):
 if __name__ == "__main__":
     #下面是获取交易日历，股票清单，日交易数据
     ts = Myts()
-    ts.get_trade_calendar() #获取交易日历
-    ts.get_stock_list()     #获取A股清单
-    ts.get_daily_deal()     #获取日交易数据
+    # ts.get_trade_calendar() #获取交易日历
+    # ts.get_stock_list()     #获取A股清单
+    # ts.get_daily_deal()     #获取日交易数据
     
     qq = Myqq()
-    asyncio.run(qq.fetch_getBoardRankList_db())
-    asyncio.run(qq.fetch_getRank_db())
-    asyncio.run(qq.fetch_batch_plate_db())
-    qq.fetch_quotes_db(codes=None) #获取qq_qt数据
+    # asyncio.run(qq.fetch_getBoardRankList_db())
+    # asyncio.run(qq.fetch_getRank_db())
+    # asyncio.run(qq.fetch_batch_plate_db())
+    # qq.fetch_quotes_db(codes=None) #获取qq_qt数据
 
-    # embed()  # 进入交互式调试环境，方便你手动操作浏览器
+    embed()  # 进入交互式调试环境，方便你手动操作浏览器
 
 
 

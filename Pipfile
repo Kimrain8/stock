@@ -28,6 +28,7 @@ uvicorn = {extras = ["standard"], version = "*"}
 python-multipart = "*"
 bokeh-fastapi = "*"
 hvplot = "*"
+lightgbm = "*"
 
 [dev-packages]
 
