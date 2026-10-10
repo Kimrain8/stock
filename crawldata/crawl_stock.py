@@ -1,7 +1,5 @@
 import json
-import subprocess
 import os
-import sys
 import pandas as pd
 import requests
 from datetime import datetime,date,timedelta
@@ -9,7 +7,6 @@ import numpy as np
 import re
 import hashlib, time
 
-import akshare as ak
 import tushare as ts
 
 import asyncio #运行异步函数需要 asyncio.run() 来执行
@@ -35,6 +32,10 @@ class Myqq():
     def __init__(self):
         self.db = MySQLHelper(db='jhd')
         self.trade_date = pd.Timestamp.now().date()
+        self.max_trade_date = self.get_max_trade_date()
+    def get_max_trade_date(self):
+        df = self.db.qry2df(f"""select max(trade_date) as trade_date from qq_hsj AS ttd""") 
+        return pd.Timestamp.now().date() if pd.isna(df.iloc[0,0]) else pd.to_datetime(df.iloc[0,0]).date()
     @staticmethod
     def get_qq_sign(plate_code, exchange=12, sort_type=1, source='zxg', stocks_type=3, user_type=4, t=int(time.time() * 1000)):
         """获取行业对应的股票明细api,生成需要的动态sign值, plate_code只含数字
@@ -343,11 +344,11 @@ class Myqq():
             'price_buy1','vol_buy1','price_buy2','vol_buy2','price_buy3','vol_buy3','price_buy4','vol_buy4','price_buy5','vol_buy5',
             'price_sel1','vol_sel1','price_sel2','vol_sel2','price_sel3','vol_sel3','price_sel4','vol_sel4','price_sel5','vol_sel5',
             'reserve1','price_time','change_amount','pct_chg','high','low','zxjle','vol_repeat','amount','hsl','pe_ttm',
-            'reserve2','high_repeat','low_repeat','zf','ltsz','zsz','pn','ztj','dtj','lb','weicha',
-            'price_avg','pe_dyna','pe_static','reserve3','reserve4','unknown5','amount_repeat','amount_fixed','vol_fixed','stock_stus_auth','market',
-            'upps','zdf_d5','ttm','roe_ttm','unknown10','high_1y','low_1y','zdf_d10','zdf_d20','zdf_d60','ltgb',
-            'zgben','weibi','reserve5','ltgb_repeat','reserve7','reserve8','reserve9','reserve10','reserve11','curr_type','unknown16','trade_stus',
-            'price_ah','unknown18','unknown19']
+            'reserve2','high_repeat','low_repeat','zf','ltsz','zsz','pn','ztj','dtj','lb','weicha','price_avg',
+            'pe_dyna','pe_static','reserve3','reserve4','unknown5','amount_repeat','amount_fixed','vol_fixed','stock_stus_auth',
+            'market','zdf_y','zdf_d5','ttm','roe_ttm','unknown10','high_1y','low_1y','zdf_d10','zdf_d20','zdf_d60','ltgb',
+            'zgben','weibi','reserve5','ltgb_repeat','reserve7','reserve8','zdf_w52','reserve10','reserve11','curr_type',
+            'unknown16','trade_stus','price_ah','unknown18','unknown19']
 
         # 检查是否正好 88 个字段,若不够则补足（但实际已有88个,但为了严谨可检查）
         if len(field_names) != 88:
@@ -420,10 +421,9 @@ class Myqq():
                 df['trade_date'] = self.trade_date
                 df['qq_code']=codes
                 self.db.bulkInsUpd(table=tbl,df=df)
-    @staticmethod
-    def get_qq_gudong(df = None, qq_code = None):
+    def get_qq_gudong(self,df = None, qq_code = None,init=0):
         """
-        获取腾讯财经流通股东数据, 返回结构化DataFrame
+        获取腾讯财经流通股东数据, 返回结构化DataFrame, 同步模式
         :param df: DataFrame, 可选, 必须包含列 qq_code, 批量抓取
         :param qq_code: str, 可选, 单股票代码, 例如 sz301206
         :return: pd.DataFrame, 字段对齐mysql表：dt,pdt,trade_date,qq_code,bdms,cgsl,gddm,gdmc,gfxz,ltbl,sqcgsl
@@ -445,11 +445,16 @@ class Myqq():
             }
             # url = f"{base_url}?{urlencode(params)}"
             # resp = await page.request.get(url, headers=headers)
-            resp = requests.get(base_url, params=params, headers=headers, timeout=10)
             df = pd.DataFrame(columns=cols)
+            try:
+                resp = requests.get(base_url, params=params, headers=headers, timeout=10)
+            except Exception as e:
+                print("request:{qq_code}出错")
+                return df
             if resp.ok:
                 match = pattern.search(resp.text)
                 if not match:
+                    print(f"not match:{qq_code}")
                     return df
                 else:
                     resp = match.group(1)
@@ -460,19 +465,50 @@ class Myqq():
                             df2 = pd.DataFrame(resp[i]['rows'])
                             df2['dt'] = resp[i]['dt']
                             df2['pdt'] = resp[i]['pdt']
-                            df2['trade_date'] = pd.Timestamp.now().date()
+                            df2['trade_date'] = self.trade_date #pd.Timestamp.now().date()
                             df2['qq_code'] = qq_code
-                            df = pd.concat([df, df2], ignore_index=True)
+                            df = pd.concat((df,df2),ignore_index=True)
                         return df
-                    except json.JSONDecodeError as e:
+                    except Exception as e:
+                        print(qq_code,resp)
                         return df
+            else:
+                print(qq_code,resp)
+                return df
+
         if df is not None and len(df)>=1 and qq_code is None :
             df_rst = _get_one(df.loc[0,'qq_code'])
             for i in range(1,len(df)):
                 df_rst = pd.concat((df_rst,_get_one(df.loc[i,'qq_code'])),ignore_index=True)
+            df_rst.replace({"--":None},inplace=True)
+            if len(df_rst)>=1 :
+                self.db.bulkInsUpd(df=df_rst,table='qq_hsj_gd')
         elif qq_code is not None and df is None:
             df_rst = _get_one(qq_code)
-        return df_rst
+            df_rst.replace({"--":None},inplace=True)
+            if len(df_rst)>=1 :
+                self.db.bulkInsUpd(df=df_rst,table='qq_hsj_gd')
+        elif df is None and qq_code is None and init == 1:
+            max_date_str = self.max_trade_date.strftime('%Y-%m-%d')
+            date_str = self.trade_date.strftime('%Y-%m-%d')
+            sql = (f"select qh.qq_code from qq_hsj qh where qh.trade_date = '{max_date_str}' "
+                   f"and not EXISTS (SELECT 1 FROM qq_hsj_gd qhg "
+                   f"WHERE qhg.qq_code = qh.qq_code "
+                   f"and qhg.trade_date = '{date_str}') ")
+            df = self.db.qry2df(sql=sql)
+            print(len(df))
+            df = df.iloc[np.random.permutation(len(df))].reset_index(drop=True)
+            for i in range(1,len(df)):
+                try:
+                    df_one = _get_one(df.loc[i,'qq_code'])
+                    df_one.replace({"--":None},inplace=True)
+                    if len(df_one)>=1 :
+                        self.db.bulkInsUpd(df=df_one,table='qq_hsj_gd')
+                except Exception as e:
+                    df_one.to_pickle('error.pkl')
+                    print(e)
+                    return -1
+        return 0
     async def fetch_qt_web(self,qq_code = "sh688041"):
             """获取整个html的数据"""
             async with async_playwright() as p:
@@ -502,7 +538,7 @@ class Myts():
     def get_trade_calendar(self,startdate=None,enddate=None):
         """获取交易日历，一小时只能访问一次,日期格式：%Y%m%d"""
         if startdate is None : startdate=self.max_trade_date
-        if enddate is None: enddate=pd.Timestamp.now().date() #pd.Timestamp(year=startdate.year, month=12, day=31).date()
+        if enddate is None: enddate=pd.Timestamp.now().date()
         if not isinstance(startdate, str): 
             startdate=startdate.strftime("%Y%m%d")
             enddate=enddate.strftime("%Y%m%d")
@@ -530,7 +566,6 @@ class Myts():
         #列名称：['ts_code', 'symbol', 'name', 'area', 'industry', 'fullname', 'enname','cnspell', 'market', 
         #'exchange', 'curr_type', 'list_status','list_date', 'delist_date', 'is_hs', 'act_name', 'act_ent_type']
         self.db.bulkInsUpd(table='ts_stock_basic',df=df)
-        
     def get_daily_deal(self,start_date_str=None,end_date_str=None,force=0):
         """
         从最大的交易日期开始，然后直到当前日期,格式:%Y-%m-%d
@@ -583,39 +618,38 @@ class Myts():
         
         print('完成数据插入')
         return 0
-
     def get_share_float(self,start_date_str=None,end_date_str=None):
-            """
-            获取解禁日期 大于等于start_date_str 小于等于end_date_str的所有解禁数据
-            如果start_date_str 为空，那么等于max_trade_date；end_date_str为空，那么就等于当前日期
-            Args:
-                start_date_str (str): 开始日期字符串，格式 'YYYY-MM-DD'。插入的日期是这个日期的下一个交易日期
-                end_date_str :结束日期字符串，格式YYYY-MM-DD
-                force: 1表示强制更新从startdate 到enddate的交易数据
-            Returns:
-                list: 交易日期字符串列表，格式 'YYYY-MM-DD'。
-            """
-            # current_date = pd.to_datetime(start_date_str)
-            # current_date_str = current_date.strftime("%Y-%m-%d")
-            # tody = pd.to_datetime(date.today() )
-            # tody_str = tody.strftime("%Y-%m-%d")
-            if start_date_str is None: 
-                start_date_str = self.max_trade_date.strftime("%Y%m%d")
-            else:
-                start_date_str = pd.to_datetime(start_date_str).date().strftime("%Y%m%d")
-                
-            if end_date_str is None: 
-                end_date_str = pd.Timestamp.now().strftime("%Y%m%d")
-            else:
-                end_date_str = pd.to_datetime(end_date_str).date().strftime("%Y%m%d")
+        """
+        获取解禁日期 大于等于start_date_str 小于等于end_date_str的所有解禁数据
+        如果start_date_str 为空，那么等于max_trade_date；end_date_str为空，那么就等于当前日期
+        Args:
+            start_date_str (str): 开始日期字符串，格式 'YYYY-MM-DD'。插入的日期是这个日期的下一个交易日期
+            end_date_str :结束日期字符串，格式YYYY-MM-DD
+            force: 1表示强制更新从startdate 到enddate的交易数据
+        Returns:
+            list: 交易日期字符串列表，格式 'YYYY-MM-DD'。
+        """
+        # current_date = pd.to_datetime(start_date_str)
+        # current_date_str = current_date.strftime("%Y-%m-%d")
+        # tody = pd.to_datetime(date.today() )
+        # tody_str = tody.strftime("%Y-%m-%d")
+        if start_date_str is None: 
+            start_date_str = self.max_trade_date.strftime("%Y%m%d")
+        else:
+            start_date_str = pd.to_datetime(start_date_str).date().strftime("%Y%m%d")
+            
+        if end_date_str is None: 
+            end_date_str = pd.Timestamp.now().strftime("%Y%m%d")
+        else:
+            end_date_str = pd.to_datetime(end_date_str).date().strftime("%Y%m%d")
 
-            df = self.pro.share_float(start_date=start_date_str,end_date=end_date_str)
-            df.rename(columns={"ann_date":"float_ann_date","holder_name":"gdmc"},inplace=True)
-            df['float_ann_date'] = pd.to_datetime(df['float_ann_date'],format='%Y%m%d').dt.date
-            df['float_date'] = pd.to_datetime(df['float_date'],format='%Y%m%d').dt.date
-            if len(df) >= 1:
-                self.db.bulkInsUpd(table='ts_share_float',df=df)
-            return 0
+        df = self.pro.share_float(start_date=start_date_str,end_date=end_date_str)
+        df.rename(columns={"ann_date":"float_ann_date","holder_name":"gdmc"},inplace=True)
+        df['float_ann_date'] = pd.to_datetime(df['float_ann_date'],format='%Y%m%d').dt.date
+        df['float_date'] = pd.to_datetime(df['float_date'],format='%Y%m%d').dt.date
+        if len(df) >= 1:
+            self.db.bulkInsUpd(table='ts_share_float',df=df)
+        return 0
 
 def mySearchDf(df, target, regex=False):
     """
@@ -708,6 +742,8 @@ if __name__ == "__main__":
     # asyncio.run(qq.fetch_getRank_db())
     # asyncio.run(qq.fetch_batch_plate_db())
     # qq.fetch_quotes_db(codes=None) #获取qq_qt数据
+    # rst = qq.get_qq_gudong(qq_code='sz001232') #
+    # print(rst)
 
     embed()  # 进入交互式调试环境，方便你手动操作浏览器
 

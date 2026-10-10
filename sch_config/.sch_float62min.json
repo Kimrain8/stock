@@ -11,13 +11,13 @@
             "lifetime": "batch"
         }
     },
-    "enddate": "2026-09-12",
+    "enddate": "2026-09-16",
     "tasks": [
         {
             "name": "get_share_float_init",
             "func": "ts:get_share_float",
             "interval": "mm_61",
-            "start_at": "2026-10-03 21:06:00",
+            "start_at": "2026-10-03 09:35:00",
             "validate": 1,
             "deps": [],
             "params": "conditionFunc.get_share_float_params()"

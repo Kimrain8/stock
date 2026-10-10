@@ -1,47 +1,38 @@
-import asyncio
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
-from playwright.async_api import async_playwright
+# import seed_browser_use as bu
+# import time, json
+# bu.navigate("https://webapi.cninfo.com.cn/#/dataBrowse")
+# bu.wait_for_load(timeout=25)
+# time.sleep(3)
+# out = bu.js("""
+# (async () => {
+#   const enc = window.indexcode.getResCode();
+#   const r = await fetch('/api-cloud-gateway-manage/apiDoc/info?gatewayCode=66ac85d341c4484a9d287f31ba59cc80', {headers:{'Accept-EncKey':enc,'X-Requested-With':'XMLHttpRequest'}});
+#   const j = await r.json();
+#   const rc = (j.data && j.data.resultContent) || {};
+#   const bi = rc.baseInfo || {};
+#   const fields = JSON.parse(rc.outputParameter || '[]');
+#   const rows = fields.map(f => (f.fieldName||f.name||'') + '|' + (f.alias||f.fieldChineseName||'') + '|' + (f.dataType||''));
+#   const inp = (j.data && j.data.requestConfig && j.data.requestConfig.inputParameter) || [];
+#   const inrows = inp.map(f => (f.fieldName||f.name||'') + '|' + (f.alias||''));
+#   return JSON.stringify({name: bi.name, alias: bi.alias, describe: bi.describe, inparams: inrows, fields: rows});
+# })()
+# """)
+# print(out)
 
-USERNAME = "13417554558"
-PASSWORD = "Jyp1681314"
-
-async def tushare_login_manual():
-    async with async_playwright() as p:
-        # ✅ launch_persistent_context 支持 user_data_dir
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir="./tushare_profile",
-            headless=False
-        )
-        page = await context.new_page()
-
-        await page.goto("https://tushare.pro/login")
-        await page.wait_for_load_state("networkidle")
-
-        await page.locator("input[placeholder='请输入手机号/邮箱']").fill(USERNAME)
-        await page.locator("input[placeholder='请输入密码']").fill(PASSWORD)
-
-        print("\n===== 请在浏览器窗口：手动输入图形验证码 → 点击登录按钮 =====")
-        print("不要关闭浏览器，等待控制台提示登录成功\n")
-
-        # 等待登录成功出现个人中心
-        await page.wait_for_selector("a:has-text('个人中心')", timeout=120000)
-        print("✅登录成功！会话保存到 ./tushare_profile")
-
-        await asyncio.sleep(5)
-        await context.close()
-
-async def crawl_after_login():
-    browser_cfg = BrowserConfig(
-        headless=False,
-        user_data_dir="./tushare_profile",
-        use_persistent_context=True
-    )
-    async with AsyncWebCrawler(config=browser_cfg) as crawler:
-        res = await crawler.arun("https://tushare.pro/weborder/#/user/privilege")
-        await asyncio.sleep(30)
-        print(res.markdown[:1000])
-
+import time
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad
+import base64
+def get_enckey( force: bool = False) -> str:
+    now = time.time()
+    # if (not force and self._ENKEY_CACHE["value"] and now - (self._ENKEY_CACHE["time"] or 0) < 5400):
+    #     return self._ENKEY_CACHE["value"]
+    key = iv = b"1234567887654321"
+    plain = str(int(now)).encode()
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    token = base64.b64encode(cipher.encrypt(pad(plain, 16))).decode()
+    # self._ENKEY_CACHE["value"], self._ENKEY_CACHE["time"] = token, now
+    return token
 
 if __name__ == "__main__":
-    # asyncio.run(tushare_login_manual())
-    asyncio.run(crawl_after_login())
+    print(get_enckey())

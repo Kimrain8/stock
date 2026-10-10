@@ -1,0 +1,42 @@
+{
+  "max_workers": 8,
+  "instances": {
+    "ts": {
+      "class": "crawl_stock:Myts",
+      "args": {},
+      "lifetime": "batch"
+    },
+    "qq": {
+      "class": "crawl_stock:Myqq",
+      "args": {},
+      "lifetime": "batch"
+    },
+    "aks": {
+      "class": "crawl_akshare:Myak",
+      "args": {},
+      "lifetime": "batch"
+    }
+  },
+  "tasks": [
+    {
+      "name": "fetch_ak_companyinfo",
+      "func": "aks:fetch_ak_companyinfo",
+      "interval": null,
+      "start_at": 0,
+      "validate": 1,
+      "deps": [],
+      "condition": {"func": "conditionFunc:always_true", "params": {}},
+      "params": "conditionFunc.get_ak_company_params()"
+    },
+    {
+      "name": "fetch_week_data",
+      "func": "reflush_watchlist:fetch_week_data",
+      "interval": null,
+      "start_at": null,
+      "validate": 0,
+      "deps": [],
+      "condition": {"func": "conditionFunc:always_true", "params": {}},
+      "params": {}
+    }
+  ]
+}

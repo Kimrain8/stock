@@ -11,25 +11,15 @@
       "lifetime": "batch"
     }
   },
-
   "tasks": [
-	{
-      "name": "get_trade_calendar",
-      "func": "ts:get_trade_calendar",
-      "interval": "D_1",
-      "start_at": "2026-09-23 09:45:00",
-      "validate": 1,
-	  "deps": [],
-      "params": {}
-    },
     {
       "name": "fetch_quotes_db_5min",
       "func": "qq:fetch_quotes_db",
-      "interval": "mm_5",
-      "start_at": "2026-09-23 00:00:00",
+      "interval": "ss_30",
+      "start_at": "2026-10-09 21:12:30",
       "validate": 1,
-	  "deps": ["get_trade_calendar"],
-      "params": {"codes": ["sz002074"], "tbl": "qq_qt_detail_tmp"}
+      "deps": [],
+      "params": {"codes": ["sz002074", "sh603799"], "tbl": "qq_qt_detail_tmp"}
     }
   ]
 }

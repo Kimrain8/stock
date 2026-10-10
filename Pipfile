@@ -29,6 +29,7 @@ python-multipart = "*"
 bokeh-fastapi = "*"
 hvplot = "*"
 lightgbm = "*"
+pycryptodome = "*"
 
 [dev-packages]
 

@@ -31,7 +31,6 @@ def get_qq_hfq_kline(
 ) -> pd.DataFrame:
     """
     获取腾讯证券日线K线数据, 返回中文字段 DataFrame。
-
     Parameters
     ----------
     symbol : str
@@ -149,8 +148,7 @@ def fetch_kline_range(
     page_size: int = 600,
 ) -> pd.DataFrame:
     """
-    按日期范围分页拉取完整日线数据。
-
+    不使用。按日期范围分页拉取完整日线数据。
     实测该接口的 start 参数无效——接口行为固定为「从 end 往前取 count 条」，
     因此本函数用「按 count 从 end 向历史方向翻页」实现，并在客户端
     严格裁剪出 [start_date, end_date] 区间，保证返回数据不越界。
@@ -232,20 +230,40 @@ def fetch_qq_kline_db(df=None):
             db.bulkInsUpd(df=df_rst,table='qq_hfq_kline')
 
 def fetch_qq_one_kline_db(qqcode,end_date=datetime.today().strftime("%Y-%m-%d"),cnt=320,adjust='hfq'):
-    """获取一只股票的的后复权K线数据, 存储到qq_hfq_kline"""
-    db = MySQLHelper(db='jhd')
-    while cnt > 0:
-        if cnt > 320: 
-            df = get_qq_hfq_kline(symbol=qqcode,end_date=end_date,count=320,adjust=adjust)
-            cnt = cnt - 320
-        else:
-            df = get_qq_hfq_kline(symbol=qqcode,end_date=end_date,count=cnt,adjust=adjust)
-            cnt = 0
-        if len(df) == 0: 
-            break
-        else:
-            db.bulkInsUpd(df=df,table='qq_hfq_kline')
-            end_date = df['trade_date'].min().strftime('%Y-%m-%d')
+    """主要是当count 大于320,需要拆分,获取一只股票的的后复权K线数据, 存储到qq_hfq_kline
+    如果cnt 为空那么就补充从2025-01-02开始到当前的复权数据
+    """
+    if cnt is None:
+        db = MySQLHelper(db='jhd')
+        symcode=qqcode[2:]
+        sql = (f"select min(qhk.trade_date) as min_trade_date,max(qhk.trade_date) as max_trade_date,"
+                f"ceil(DATEDIFF(min(qhk.trade_date) ,cast('2025-01-02' as date))*5/7)-1 as cnt1,"
+                f"ceil(DATEDIFF(CURDATE(), max(qhk.trade_date))*5/7) -1 as cnt2 "
+                f"from qq_hfq_kline AS qhk where qhk.symbol = '{symcode}' ")
+        dfl = db.qry2df(sql=sql)
+        if dfl.loc[0,'cnt1'] >= 1:
+            df1 = get_qq_hfq_kline(symbol=qqcode,end_date=dfl.loc[0,'min_trade_date'].strftime('%Y-%m-%d'),count=dfl.loc[0,'cnt1'],adjust=adjust)
+            if len(df1)>=1:
+                db.bulkInsUpd(df=df1,table='qq_hfq_kline')
+        if dfl.loc[0,'cnt2'] >= 1:
+            df2 = get_qq_hfq_kline(symbol=qqcode,count=dfl.loc[0,'cnt2'],adjust=adjust)
+            if len(df2)>=1:
+                db.bulkInsUpd(df=df2,table='qq_hfq_kline')
+        if dfl.loc[0,'cnt1'] < 1 and dfl.loc[0,'cnt2']<1:
+            print(f"{qqcode}已经包含全部数据")
+    else:
+        while cnt > 0:
+            if cnt > 320: 
+                df = get_qq_hfq_kline(symbol=qqcode,end_date=end_date,count=320,adjust=adjust)
+                cnt = cnt - 320
+            else:
+                df = get_qq_hfq_kline(symbol=qqcode,end_date=end_date,count=cnt,adjust=adjust)
+                cnt = 0
+            if len(df) == 0: 
+                break
+            else:
+                db.bulkInsUpd(df=df,table='qq_hfq_kline')
+                end_date = df['trade_date'].min().strftime('%Y-%m-%d')
 
 def build_session(proxy: Optional[str] = DEFAULT_PROXY) -> requests.Session:
     """创建带 socks5 代理、伪装浏览器头的会话"""
@@ -273,11 +291,9 @@ def _fetch_one(
 ):
     """
     抓取单只股票的日线数据，失败按指数退避重试。
-
     两种取数模式：
     - 指定 start_date/end_date: 按日期区间自动分页拉取该区间全部日线
     - 未指定: 取最近 count 条
-
     Returns
     -------
     (symbol, df_or_None, error_or_None)
@@ -420,18 +436,19 @@ def batch_fetch_kline(
 
 
 if __name__ == "__main__":
-    # df = get_qq_qfq_kline("sh688502", count=320)
-    # df2 = get_qq_qfq_kline("sh688502",adjust='none', count=320)
-    # df = pd.DataFrame({'qq_code':['sh688502','sh603799']})
-    # fetch_qq_kline_db(df=None)
-    if len(sys.argv)==1:
-        print("调用格式: python crawl_qq_fq.py sh688502 count hfq")
-    elif len(sys.argv)==2:
-        fetch_qq_one_kline_db(sys.argv[1])
-    elif len(sys.argv)==3:
-        fetch_qq_one_kline_db(sys.argv[1],cnt=sys.argv[2])
-    elif len(sys.argv)==4:
-            fetch_qq_one_kline_db(sys.argv[1],cnt=sys.argv[2],adjust=sys.argv[3])
+    fetch_qq_one_kline_db(qqcode='sh600737',cnt=None,adjust='hfq')
+    
+    
+    # if len(sys.argv)==1:
+    #     print("调用格式: python crawl_qq_fq.py sh688502 count hfq")
+    # elif len(sys.argv)==2:
+    #     fetch_qq_one_kline_db(sys.argv[1])
+    # elif len(sys.argv)==3:
+    #     fetch_qq_one_kline_db(sys.argv[1],cnt=sys.argv[2])
+    # elif len(sys.argv)==4:
+    #         fetch_qq_one_kline_db(sys.argv[1],cnt=sys.argv[2],adjust=sys.argv[3])
+            
+            
     # ---- 示例：输入 DataFrame，列名为 qqcode ----
     # sample = pd.DataFrame({
     #     "qqcode": ["sh688502", "sz300750", "sh600519"],

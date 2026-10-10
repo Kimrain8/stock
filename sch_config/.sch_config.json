@@ -1,4 +1,5 @@
 {
+  "max_workers": 8,
   "instances": {
     "ts": {
       "class": "crawl_stock:Myts",
@@ -7,6 +8,11 @@
     },
     "qq": {
       "class": "crawl_stock:Myqq",
+      "args": {},
+      "lifetime": "batch"
+    },
+    "aks": {
+      "class": "crawl_akshare:Myak",
       "args": {},
       "lifetime": "batch"
     }
@@ -39,6 +45,15 @@
       "validate": 1,
 	  "deps": ["get_stock_list"],
 	  "condition": {"func": "conditionFunc:checkDateOpen","params": {}},
+      "params": {}
+    },
+	{
+      "name": "get_share_float",
+      "func": "ts:get_share_float",
+      "interval": 0,
+      "start_at": null,
+      "validate": 1,
+	  "deps": ["get_daily_deal"],
       "params": {}
     },
 	{
@@ -80,13 +95,13 @@
       "params": {}
     },
 	{
-      "name": "fetch_quotes_db_5min",
-      "func": "qq:fetch_quotes_db",
-      "interval": "mm_5",
-      "start_at": "17:35:00",
-      "validate": 0,
-	  "deps": [],
-      "params": {"codes": ["sz002074"], "tbl": "qq_qt_detail_tmp"}
+      "name": "fetch_ak_companyinfo",
+      "func": "aks:fetch_ak_companyinfo",
+      "interval": 0,
+      "start_at": null,
+      "validate": 1,
+	  "deps": ["fetch_quotes_db"],
+      "params": "conditionFunc.get_ak_company_params()"
     }
   ]
 }
