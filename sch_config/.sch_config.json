@@ -17,91 +17,135 @@
       "lifetime": "batch"
     }
   },
-
   "tasks": [
-	{
+    {
       "name": "get_trade_calendar",
       "func": "ts:get_trade_calendar",
       "interval": "D_1",
-      "start_at": "2026-09-23 17:25:00",
+      "start_at": "2026-10-13 17:16:00",
       "validate": 1,
-	  "deps": [],
+      "deps": [],
       "params": {}
     },
-	{
+    {
       "name": "get_stock_list",
       "func": "ts:get_stock_list",
       "interval": 0,
       "start_at": null,
       "validate": 1,
-	  "deps": ["get_trade_calendar"],
+      "deps": ["get_trade_calendar"],
       "params": {}
     },
-	{
+    {
       "name": "get_daily_deal",
       "func": "ts:get_daily_deal",
       "interval": 0,
       "start_at": null,
       "validate": 1,
-	  "deps": ["get_stock_list"],
-	  "condition": {"func": "conditionFunc:checkDateOpen","params": {}},
+      "deps": ["get_stock_list"],
+      "condition": {"func": "conditionFunc:checkDateOpen", "params": {}},
       "params": {}
     },
-	{
-      "name": "get_share_float",
-      "func": "ts:get_share_float",
-      "interval": 0,
-      "start_at": null,
-      "validate": 1,
-	  "deps": ["get_daily_deal"],
-      "params": {}
-    },
-	{
+    {
       "name": "fetch_getBoardRankList_db",
       "func": "qq:fetch_getBoardRankList_db",
       "interval": 0,
       "start_at": null,
       "validate": 1,
-	  "deps": ["get_daily_deal"],
+      "deps": ["get_daily_deal"],
       "params": {}
     },
-	{
+    {
       "name": "fetch_getRank_db",
       "func": "qq:fetch_getRank_db",
       "interval": 0,
       "start_at": null,
       "validate": 1,
-	  "deps": ["fetch_getBoardRankList_db"],
+      "deps": ["fetch_getBoardRankList_db"],
       "params": {}
     },
-	{
+    {
       "name": "fetch_batch_plate_db",
       "func": "qq:fetch_batch_plate_db",
       "interval": 0,
       "start_at": null,
       "validate": 1,
-	  "retry": 3,
-	  "retry_backoff": [2, 3, 5],
-	  "deps": ["fetch_getRank_db"],
+      "retry": 3,
+      "retry_backoff": [2, 3, 5],
+      "deps": ["fetch_getRank_db"],
       "params": {}
     },
-	{
+    {
       "name": "fetch_quotes_db",
       "func": "qq:fetch_quotes_db",
       "interval": 0,
       "start_at": null,
       "validate": 1,
-	  "deps": ["fetch_batch_plate_db"],
+      "deps": ["fetch_batch_plate_db"],
       "params": {}
     },
-	{
+    {
       "name": "fetch_ak_companyinfo",
       "func": "aks:fetch_ak_companyinfo",
       "interval": 0,
       "start_at": null,
       "validate": 1,
-	  "deps": ["fetch_quotes_db"],
+      "deps": ["fetch_quotes_db"],
       "params": "conditionFunc.get_ak_company_params()"
+    },
+    {
+      "name": "get_ak_dividend",
+      "func": "aks:get_ak_dividend",
+      "interval": 0,
+      "start_at": null,
+      "validate": 1,
+      "deps": ["fetch_ak_companyinfo"],
+      "params": "conditionFunc.get_ak_dividend_params()"
+    },
+    {
+      "name": "get_ak_gd_num",
+      "func": "aks:get_ak_gd_num",
+      "interval": 0,
+      "start_at": null,
+      "validate": 1,
+      "deps": ["fetch_ak_companyinfo"],
+      "params": "conditionFunc.get_ak_dividend_params()"
+    },
+    {
+      "name": "get_share_float",
+      "func": "aks:get_share_float",
+      "interval": 0,
+      "start_at": null,
+      "validate": 1,
+      "deps": ["get_ak_gd_num"],
+      "params": {}
+    },
+    {
+      "name": "get_ak_Reduce",
+      "func": "aks:get_ak_Reduce",
+      "interval": 0,
+      "start_at": null,
+      "validate": 1,
+      "deps": ["get_share_float"],
+      "params": {}
+    },
+    {
+      "name": "get_ak_Increase",
+      "func": "aks:get_ak_Increase",
+      "interval": 0,
+      "start_at": null,
+      "validate": 1,
+      "deps": ["get_ak_Reduce"],
+      "params": {}
+    },
+    {
+      "name": "get_ak_pfmc_frcst",
+      "func": "aks:get_ak_pfmc_frcst",
+      "interval": 0,
+      "start_at": null,
+      "validate": 1,
+      "deps": ["get_ak_Increase"],
+      "params": "conditionFunc.get_pfmc_frcst_params()"
     }
   ]
 }

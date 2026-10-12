@@ -139,42 +139,49 @@ class Myak():
             data = _do_request()
         return data
 
-    def get_ak_companyinfo(self, symbol=None, proxy_pool: list = None, max_retries: int = 3,timeout: int = 30,
-                           retry_sleep: tuple = (2, 6)):
-            """
-            调用巨潮 p_sysapi1018 业务接口，返回 pandas.DataFrame。
-            :param symbol:      多个证券代码，如 "000408,300750"
-            :param timeout:     请求超时（秒）
-            :param proxy_pool:  代理列表。默认使用本机 SSH 动态转发的 SOCKS5 代理 socks5h://127.0.0.1:9988
-            :param max_retries: 单次请求最大重试次数（每次都会随机等待）
-            :param retry_sleep: 重试间隔（秒），随机区间 (min, max)
-            :return:            pandas.DataFrame 或 -1
-            """
-            DATA_URL = self.BASE_URL + "/api/sysapi/p_sysapi1018"      # 业务数据接口
+    def get_ak_companyinfo(self, symbol=None, proxy_pool: list = None,method="GET"):
+        """
+        调用巨潮 p_sysapi1018 业务接口，返回 pandas.DataFrame。
+        :param symbol:      多个证券代码，如 "000408,300750"
+        :param timeout:     请求超时（秒）
+        :param proxy_pool:  代理列表。默认使用本机 SSH 动态转发的 SOCKS5 代理 socks5h://127.0.0.1:9988
+        :param max_retries: 单次请求最大重试次数（每次都会随机等待）
+        :param retry_sleep: 重试间隔（秒），随机区间 (min, max)
+        :return:            pandas.DataFrame 或 -1
+        """
+        DATA_URL = self.BASE_URL + "/api/sysapi/p_sysapi1018"      # 业务数据接口
 
-            data = self._request(data_url=DATA_URL,params={"scode":symbol},method='GET',proxy_pool=proxy_pool)
-            if not isinstance(data, dict) or "records" not in data:
+        data = self._request(data_url=DATA_URL,params={"scode":symbol},method=method,proxy_pool=proxy_pool)
+        if not isinstance(data, dict) or "records" not in data:
+            return -1
+
+        data = pd.DataFrame(data['records'])
+        data.rename(columns={"SECCODE":"symbol","SECNAME":"name","ORGNAME":"fullname","F001V":"market","F003V":"exchange","F002D":"list_date",
+"F005D":"del_Date","F004V":"list_status","F009D":"estab_date","F007V":"enname","F008V":"enshort","F006V":"isin_code",
+"F011V":"act_name","F029V":"Chairman","F031V":"ceo","F032V":"secretary","F036V":"stock_rep","F030V":"indep_dir",
+"F015V":"area","F016V":"city","F017V":"reg_adrs","F018V":"off_adrs","F019V":"zipcode","F020V":"phone","F021V":"fax",
+"F023V":"website","F022V":"email","F024V":"camac_l1","F025V":"camac_l2","F026V":"sw_l1","F027V":"name_hy",
+"F028V":"sw_l3","F012V":"main_bus","F013V":"bus_scope","F014V":"cmpy_desc","F010N":"reg_capital","F037V":"ext_aud",
+"F038V":"law_firm","F033V":"sec_phone","F034V":"sec_fax","F035V":"sec_email"},inplace=True)
+        
+        for col in ("list_date", "estab_date"):
+            if col in data.columns:
+                data[col] = pd.to_datetime(data[col], format="%Y-%m-%d",errors="coerce").dt.date
+        if len(data)>=1:
+            try:
+                self.db.bulkInsUpd(df=data, table="ak_stock_basic")
+                #下面更新my_choice_stock
+                key = data['exchange'].str.extract(r'^(上交所|深交所|北交所)', expand=False)
+                ts_map = {'上交所': '.SH', '深交所': '.SZ', '北交所': '.BJ'}
+                qq_map = {'上交所': 'sh',  '深交所': 'sz',  '北交所': 'bj'}
+                data = data[['symbol','name','camac_l1','camac_l2','sw_l1','name_hy','sw_l3']]
+                data['qq_code'] = key.map(qq_map) + data['symbol'].astype(str)
+                data['ts_code'] = data['symbol'].astype(str) + key.map(ts_map)
+                self.db.bulkInsUpd(df=data, table="my_choice_stock")
+            except Exception as e:
+                data.to_pickle('error.pkl')
                 return -1
-
-            data = pd.DataFrame(data['records'])
-            data.rename(columns={"SECCODE":"symbol","SECNAME":"name","ORGNAME":"fullname","F001V":"market","F003V":"exchange","F002D":"list_date",
-    "F005D":"del_Date","F004V":"list_status","F009D":"estab_date","F007V":"enname","F008V":"enshort","F006V":"isin_code",
-    "F011V":"act_name","F029V":"Chairman","F031V":"ceo","F032V":"secretary","F036V":"stock_rep","F030V":"indep_dir",
-    "F015V":"area","F016V":"city","F017V":"reg_adrs","F018V":"off_adrs","F019V":"zipcode","F020V":"phone","F021V":"fax",
-    "F023V":"website","F022V":"email","F024V":"camac_l1","F025V":"camac_l2","F026V":"sw_l1","F027V":"name_hy",
-    "F028V":"sw_l3","F012V":"main_bus","F013V":"bus_scope","F014V":"cmpy_desc","F010N":"reg_capital","F037V":"ext_aud",
-    "F038V":"law_firm","F033V":"sec_phone","F034V":"sec_fax","F035V":"sec_email"},inplace=True)
-            
-            for col in ("list_date", "estab_date"):
-                if col in data.columns:
-                    data[col] = pd.to_datetime(data[col], format="%Y-%m-%d",errors="coerce").dt.date
-            if len(data)>=1:
-                try:
-                    self.db.bulkInsUpd(df=data, table="ak_stock_basic")
-                except Exception as e:
-                    data.to_pickle('error.pkl')
-                    return -1
-            return 0
+        return 0
     def get_ak_companyinfo2(self, symbol, timeout: int = 30,proxy_pool: list = None, max_retries: int = 3,
                        retry_sleep: tuple = (2, 6)):
         """
@@ -300,8 +307,7 @@ class Myak():
             df = self.get_ak_companyinfo(symbol=','.join(codes)) #proxy_pool=["socks5h://127.0.0.1:9988"]
             if df == -1:
                 break
-    def get_ak_dividend(self, rdate: str, symbol: str = None, timeout: int = 30,proxy_pool: list = None, max_retries: int = 3,
-                        retry_sleep: tuple = (2, 6)):
+    def get_ak_dividend(self, rdate=None, symbol: str = None, proxy_pool: list = None):
         """
         调用巨潮 p_sysapi1129 分红送配接口，返回 pandas.DataFrame。
         :param rdate:       分红年度（报告期），必填,20261231:年报; 20260630: 半年; 20260930: 三季报
@@ -344,9 +350,7 @@ class Myak():
         if len(df)>=1:
             self.db.bulkInsUpd(df=df,table='ak_dividend')
         return 0
-    def get_ak_forecast_increase(self, rdate: str, symbol: str = None, timeout: int = 30,
-                                 proxy_pool: list = None, max_retries: int = 3,
-                                 retry_sleep: tuple = (2, 6)):
+    def get_ak_forecast_increase(self, rdate=None, symbol: str = None, proxy_pool: list = None):
         """
         调用巨潮 p_sysapi1040 业绩预告（业绩大幅上升/预增）接口，返回 pandas.DataFrame。
         :param rdate:       报告期，必填,20261231:年报; 20260630: 半年; 20260930: 三季报
@@ -391,9 +395,7 @@ class Myak():
         if len(df)>=1:
             self.db.bulkInsUpd(df=df,table='ak_prepfmc')
         return 0
-    def get_ak_forecast_decrease(self, rdate: str, symbol: str = None, timeout: int = 30,
-                                 proxy_pool: list = None, max_retries: int = 3,
-                                 retry_sleep: tuple = (2, 6)) -> pd.DataFrame:
+    def get_ak_forecast_decrease(self, rdate=None, symbol: str = None, proxy_pool: list = None) -> pd.DataFrame:
         """
         调用巨潮 p_sysapi1039 业绩预告（业绩大幅下降/预减）接口，返回 pandas.DataFrame。
         :param rdate:       报告期，如 "20260630"；必填（对应专题统计-业绩报表-业绩预告·预减）
@@ -439,17 +441,242 @@ class Myak():
         if len(df)>=1:
             self.db.bulkInsUpd(df=df,table='ak_prepfmc_desc')
         return 0
+    def get_ak_gd_num(self, rdate=None, symbol=None, proxy_pool: list = None):
+        """
+        调用巨潮 p_sysapi1034 股东人数及持股集中度，返回 pandas.DataFrame。
+        :param rdate:       报告期，必填,20261231:年报; 20260630: 半年; 20260930: 三季报
+        :param symbol:      可选，证券代码（如 "000408"）。该接口返回全市场，传了则在结果内过滤出该只股票
+        :param timeout:     请求超时（秒）
+        :param proxy_pool:  代理列表。默认使用 self.proxy_pool（SSH 动态转发 SOCKS5）
+        :param max_retries: 单次请求最大重试次数（每次随机等待）
+        :param retry_sleep: 重试间隔（秒），随机区间 (min, max)
+        :return:            pandas.DataFrame 或 -1
+        """
+        DATA_URL = self.BASE_URL + "/api/sysapi/p_sysapi1034"
+
+        data = self._request(data_url=DATA_URL,method="POST",params={"rdate":rdate},proxy_pool=proxy_pool)
+        if not isinstance(data, dict) or "records" not in data:
+            return -1
+        df = pd.DataFrame(data["records"])
+        # ---------- 5. 中文/字段名 -> 英文简写 ----------
+        df.rename(columns={
+            "SECCODE": "symbol",      # 股票代码
+            "SECNAME": "name",        # 股票简称
+            "ENDDATE":  "end_date",     # 变动日期
+            "F001N":  "gd_num",         # 本期股东人数
+            "F002N":  "pre_gd_num",    # 上期股东人数
+            "F003N":  "zf_gd_num",  # 股东人数增幅
+            "F004N":  "cgsl_avg",# 本期人均持股数量
+            "F005N":  "sqcgsl_avg",     # 上期人均持股数量
+            "F006N":  "zf_cgsl_avg",   # 人均持股数量增幅
+        }, inplace=True)
+
+        # ---------- 6. 日期字段标准化 ----------
+        date_cols = [c for c in ("end_date") if c in df.columns]
+        for col in date_cols:
+            df[col] = pd.to_datetime(df[col], format="%Y-%m-%d", errors="coerce").dt.date
+        # ---------- 7. 按 symbol 过滤（可选） ----------
+        if symbol:
+            symbol = str(symbol).zfill(6)
+            df = df[df["symbol"] == symbol].reset_index(drop=True)
+        if len(df)>=1:
+            self.db.bulkInsUpd(df=df,table='ak_gd_num')
+        return 0
+    def get_share_float(self, tdate=None, symbol=None, proxy_pool: list = None):
+        """
+        https://webapi.cninfo.com.cn/api/sysapi/p_sysapi1024?tdate=2026-10-19
+        获取解禁数据 只能输入具体的日期信息。所以获取的对于当前日期的7天之内的数据。
+        :param tdate:       解禁日期，必填,2026-10-19
+        :param symbol:      可选，证券代码（如 "000408"）。该接口返回全市场，传了则在结果内过滤出该只股票
+        :param proxy_pool:  代理列表。默认使用 self.proxy_pool（SSH 动态转发 SOCKS5）
+        :return:            pandas.DataFrame 或 -1
+        """
+        DATA_URL = self.BASE_URL + "/api/sysapi/p_sysapi1024"
         
+        def _get_one(tdate):
+            data = self._request(data_url=DATA_URL,method="POST",params={"tdate":tdate},proxy_pool=proxy_pool)
+            if not isinstance(data, dict) or "records" not in data:
+                return -1
+            df = pd.DataFrame(data["records"])
+            # ---------- 5. 中文/字段名 -> 英文简写 ----------
+            df.rename(columns={
+                "SECCODE": "symbol",      # 股票代码
+                "SECNAME": "name",        # 股票简称
+                "DECLAREDATE":  "float_ann_date",     # 公告日期
+                "F003D":  "float_date",         # 实际解除限售日期
+                "F004N":  "float_share",    # 实际解除限售数量
+                "F005N":  "float_ratio",  # 实际解除限售比例
+                "F008N":  "ltgb", # 实际可流通数量
+            }, inplace=True)
+    
+            # ---------- 6. 日期字段标准化 ----------
+            date_cols = [c for c in ("float_ann_date","imp_ann_date") if c in df.columns]
+            for col in date_cols:
+                df[col] = pd.to_datetime(df[col], format="%Y-%m-%d", errors="coerce").dt.date
+            
+            return df
         
+        if tdate is None: 
+            date_list = pd.date_range(pd.Timestamp.now().strftime("%Y-%m-%d"),
+                                      (pd.Timestamp.now()+ pd.DateOffset(days=7)).strftime("%Y-%m-%d"))
+            df = pd.DataFrame({
+                'symbol': pd.Series(dtype='string'),
+                'name': pd.Series(dtype='string'),
+                'float_ann_date': pd.Series(dtype='datetime64[ns]'),
+                'float_date': pd.Series(dtype='datetime64[ns]'),
+                'float_share': pd.Series(dtype='Float64'),
+                'float_ratio': pd.Series(dtype='Float64'),
+                'ltgb': pd.Series(dtype='Float64'),
+            })
+            for i in date_list:
+                df2 = _get_one(i.strftime("%Y-%m-%d"))
+                if len(df2)>=1:
+                    df = pd.concat((df,df2))
+        else:
+            df = _get_one(tdate=tdate)
+
+        # ---------- 7. 按 symbol 过滤（可选） ----------
+        if symbol:
+            symbol = str(symbol).zfill(6)
+            df = df[df["symbol"] == symbol].reset_index(drop=True)
+        if len(df)>=1:
+            self.db.bulkInsUpd(df=df,table='ak_share_float')
+        return 0
+    def get_ak_Reduce(self, sdate=None,edate=None, symbol=None, proxy_pool: list = None):
+            """
+            https://webapi.cninfo.com.cn/api/sysapi/p_sysapi1027?sdate=2026-09-11&edate=2026-10-11
+            获取减持汇总信息 大于等于start_date_str 小于等于end_date_str的所有解禁数据
+            :param tdate:       解禁日期，必填,2026-10-19
+            :param symbol:      可选，证券代码（如 "000408"）。该接口返回全市场，传了则在结果内过滤出该只股票
+            :param proxy_pool:  代理列表。默认使用 self.proxy_pool（SSH 动态转发 SOCKS5）
+            :return:            pandas.DataFrame 或 -1
+            """
+            DATA_URL = self.BASE_URL + "/api/sysapi/p_sysapi1027"
+            if sdate is None:
+                sdate = (pd.Timestamp.now() + pd.DateOffset(months=-11)).strftime('%Y-%m-%d')
+            if edate is None:
+                edate = pd.Timestamp.now().strftime('%Y-%m-%d')
+            data = self._request(data_url=DATA_URL,params={"sdate":sdate,"edate":edate},method="POST",proxy_pool=proxy_pool)
+            if not isinstance(data, dict) or "records" not in data:
+                return -1
+            df = pd.DataFrame(data["records"])
+            # ---------- 5. 中文/字段名 -> 英文简写 ----------
+            df.rename(columns={
+                "SECCODE": "symbol",      # 股票代码
+                "SECNAME": "name",        # 股票简称
+                "DECLAREDATE":  "red_ann_date",     # 公告日期
+                "F004N":  "red_vol",         # 减持数量汇总(股)
+                "F005N":  "red_ratio",    # 减持比例汇总(%)
+            }, inplace=True)
+    
+            # ---------- 6. 日期字段标准化 ----------
+            date_cols = [c for c in ("red_ann_date") if c in df.columns]
+            for col in date_cols:
+                df[col] = pd.to_datetime(df[col], format="%Y-%m-%d", errors="coerce").dt.date
+            # ---------- 7. 按 symbol 过滤（可选） ----------
+            if symbol:
+                symbol = str(symbol).zfill(6)
+                df = df[df["symbol"] == symbol].reset_index(drop=True)
+            if len(df)>=1:
+                self.db.bulkInsUpd(df=df,table='ak_reduce_tot')
+            return 0
+    def get_ak_Increase(self, sdate=None,edate=None, symbol=None, proxy_pool: list = None):
+        """
+        https://webapi.cninfo.com.cn/api/sysapi/p_sysapi1028?sdate=2026-09-11&edate=2026-10-11
+        获取减持汇总信息 大于等于start_date_str 小于等于end_date_str的所有解禁数据
+        :param tdate:       解禁日期，必填,2026-10-19
+        :param symbol:      可选，证券代码（如 "000408"）。该接口返回全市场，传了则在结果内过滤出该只股票
+        :param proxy_pool:  代理列表。默认使用 self.proxy_pool（SSH 动态转发 SOCKS5）
+        :return:            pandas.DataFrame 或 -1
+        """
+        DATA_URL = self.BASE_URL + "/api/sysapi/p_sysapi1028"
+        if sdate is None:
+            sdate = (pd.Timestamp.now() + pd.DateOffset(months=-11)).strftime('%Y-%m-%d')
+        if edate is None:
+            edate = pd.Timestamp.now().strftime('%Y-%m-%d')
+        data = self._request(data_url=DATA_URL,params={"sdate":sdate,"edate":edate},method="POST",proxy_pool=proxy_pool)
+        if not isinstance(data, dict) or "records" not in data:
+            return -1
+        df = pd.DataFrame(data["records"])
+        # ---------- 5. 中文/字段名 -> 英文简写 ----------
+        df.rename(columns={
+            "SECCODE": "symbol",      # 股票代码
+            "SECNAME": "name",        # 股票简称
+            "DECLAREDATE":  "inc_ann_date",     # 公告日期
+            "F004N":  "inc_vol",         # 减持数量汇总(股)
+            "F005N":  "inc_ratio",    # 减持比例汇总(%)
+        }, inplace=True)
+
+        # ---------- 6. 日期字段标准化 ----------
+        date_cols = [c for c in ("inc_ann_date") if c in df.columns]
+        for col in date_cols:
+            df[col] = pd.to_datetime(df[col], format="%Y-%m-%d", errors="coerce").dt.date
+        # ---------- 7. 按 symbol 过滤（可选） ----------
+        if symbol:
+            symbol = str(symbol).zfill(6)
+            df = df[df["symbol"] == symbol].reset_index(drop=True)
+        if len(df)>=1:
+            self.db.bulkInsUpd(df=df,table='ak_Increase_tot')
+        return 0
+    def get_ak_pfmc_frcst(self, rdate=None,symbol=None, proxy_pool: list = None):
+        """
+        https://webapi.cninfo.com.cn/api/sysapi/p_sysapi1037?rdate=20261231
+        获取业绩预测数据 报告年份: 20261231
+        :param rdate:       报告年份，必填,2026-10-19
+        :param symbol:      可选，证券代码（如 "000408"）。该接口返回全市场，传了则在结果内过滤出该只股票
+        :param proxy_pool:  代理列表。默认使用 self.proxy_pool（SSH 动态转发 SOCKS5）
+        :return:            pandas.DataFrame 或 -1
+        """
+        DATA_URL = self.BASE_URL + "/api/sysapi/p_sysapi1037"
+        if rdate is None:
+            print("报告年份为空")
+            return -1
+
+        data = self._request(data_url=DATA_URL,params={"rdate":rdate},method="POST",proxy_pool=proxy_pool)
+        if not isinstance(data, dict) or "records" not in data:
+            return -1
+        df = pd.DataFrame(data["records"])
+        # ---------- 5. 中文/字段名 -> 英文简写 ----------
+        df.rename(columns={
+            "SECCODE": "symbol",      # 股票代码
+            "SECNAME": "name",        # 股票简称
+            "DECLAREDATE":  "declare_date",  # 预告业绩日期
+            "F001D":  "rdate",         # 报告日期
+            "F002V":  "name_hy",    # 申万行业二级名称
+            "F003V":  "change_type",    # 业绩变动类型
+            "F004V":  "forecast_desc",    # 业绩预告说明
+            "F005V":  "change_reason",    # 业绩变动原因
+            "F009N":  "change_min",    # 预告净利润变动幅度上限
+            "F010N":  "change_max",    # 预告净利润变动幅度下限
+        }, inplace=True)
+
+        # ---------- 6. 日期字段标准化 ----------
+        date_cols = [c for c in ("DECLAREDATE","rdate") if c in df.columns]
+        for col in date_cols:
+            df[col] = pd.to_datetime(df[col], format="%Y-%m-%d", errors="coerce").dt.date
+        # ---------- 7. 按 symbol 过滤（可选） ----------
+        if symbol:
+            symbol = str(symbol).zfill(6)
+            df = df[df["symbol"] == symbol].reset_index(drop=True)
+        if len(df)>=1:
+            self.db.bulkInsUpd(df=df,table='ak_pfmc_frcst')
+        return 0
+    
     
 if __name__ == "__main__":
     aks = Myak()
     # rst = aks.get_ak_companyinfo(symbol='603137,920725,000504,000505') #,proxy_pool=["socks5h://127.0.0.1:9988"]
     # rst = aks.get_ak_companyinfo2(symbol='603137,920725,000504,000505') #,proxy_pool=["socks5h://127.0.0.1:9988"]
-    aks.fetch_ak_companyinfo()
+    # aks.fetch_ak_companyinfo()
     # rst = aks.get_ak_dividend(rdate='20260331')
     # rst = aks._request(data_url=aks.BASE_URL+"/api/sysapi/p_sysapi1040",params={"rdate": "20260930"},method="POST")
     # rst = aks.get_ak_forecast_increase(rdate='20260930')
     # rst = aks.get_ak_forecast_decrease(rdate='20260630')
-
-    embed()
+    # from conditionFunc import get_ak_dividend_params
+    # d = get_ak_dividend_params()
+    # rst = aks.get_ak_gd_num(rdate='20260930')
+    # rst = aks.get_share_float()
+    # rst = aks.get_ak_Reduce()
+    # rst = aks.get_ak_Increase()
+    rst = aks.get_ak_pfmc_frcst(rdate='20261231')
+    # embed()

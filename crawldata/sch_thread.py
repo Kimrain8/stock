@@ -16,8 +16,17 @@ scheduler.py —— 多进程调度器
   pause [<task>]      暂停（无任务名 = 全部）
   resume <task>       恢复
   update              重新加载配置
-  cancel              退出（保存状态）
+  save                保存配置文件 + 状态文件（不退出）
+  cancel              保存配置文件 + 状态文件，然后退出
   help                帮助
+
+最新 FIX（本次）:
+  - 新增 save 命令：回写 start_at 到 config + 保存 state 文件，不退出
+  - cancel 命令：先执行 save 逻辑，再退出
+  - 状态保存策略调整：
+      * 每个任务完成时（_handle_task_done）继续保存 state（链条推进落盘）
+      * 主进程正常关闭时不再自动保存（_shutdown_all 里注释掉）
+      * Ctrl+C / 异常退出：不保存
 """
 from __future__ import annotations
 
@@ -887,6 +896,71 @@ class Scheduler:
                     else:
                         log.exception("保存状态失败（已重试 4 次）")
 
+    # >>> FIX 最新: 新增 save_start_at_to_config —— 回写 next_run 到 config 的 start_at
+    #                与单线程版保持一致，save / cancel 命令会调用它
+    def save_start_at_to_config(self) -> int:
+        """回写 next_run 到 start_at（细节略，见上轮）"""
+        if not self._config_path:
+            return 0
+        try:
+            with open(self._config_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception:
+            log.exception("读取配置文件失败，无法回写 start_at")
+            return 0
+        updated = 0
+        for spec in cfg.get("tasks", []):
+            name = spec.get("name")
+            if not name:
+                continue
+            t = self._tasks.get(name)
+            if t is None:
+                continue
+            orig = spec.get("start_at")
+            if orig is None or orig == "":
+                continue
+            if t.next_run is None:
+                continue
+            new_start = t.next_run.strftime("%Y-%m-%d %H:%M:%S")
+            if str(orig) != new_start:
+                spec["start_at"] = new_start
+                updated += 1
+                log.info("[%s] start_at 回写: %s -> %s",
+                         name, orig, new_start)
+        if updated == 0:
+            log.info("无需回写 start_at")
+            return 0
+        try:
+            tmp = self._config_path + ".tmp"
+            text = _json_dumps_compact(cfg, indent=2, max_depth=3)
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.write("\n")
+            os.replace(tmp, self._config_path)
+            log.info("已回写 %d 个任务的 start_at 到 %s",
+                     updated, self._config_path)
+        except Exception:
+            log.exception("写回配置文件失败")
+            return 0
+        return updated
+
+    # >>> FIX 最新: 新增 _do_save —— save / cancel 共用的保存动作
+    def _do_save(self) -> None:
+        """保存 config（start_at 回写）+ state 文件"""
+        try:
+            n = self.save_start_at_to_config()
+            if n > 0:
+                print(f"已回写 {n} 个任务的 start_at 到配置文件")
+            else:
+                print("无需回写 start_at")
+        except Exception:
+            log.exception("回写 start_at 失败")
+        try:
+            self._save_state()
+            print(f"已保存状态文件: {self._state_file}")
+        except Exception:
+            log.exception("保存状态失败")
+
     def _reload_config(self) -> None:
         if not self._config_path:
             return
@@ -1338,7 +1412,8 @@ class Scheduler:
             for r in ready:
                 self._spawn_worker(r)
 
-        # 写状态文件
+        # >>> FIX 最新: 每个任务完成即保存 state（"前面的一个执行链条执行完毕，也写文件"）
+        #                不改动，保留原有行为
         self._save_state()
 
         # 通知钩子（简单处理：主进程直接调用）
@@ -1427,7 +1502,14 @@ class Scheduler:
             self._reload_flag = True
             self._reload_config()
             print("配置已重载")
+        # >>> FIX 最新: 新增 save 命令 —— 保存 config + state，不退出
+        elif line == "save":
+            print("正在保存...")
+            self._do_save()
         elif line == "cancel":
+            # >>> FIX 最新: cancel 也保存 config + state
+            print("正在取消所有任务和调度计划...")
+            self._do_save()
             print("正在退出...")
             self._stop = True
         elif line == "status":
@@ -1539,11 +1621,12 @@ class Scheduler:
         self._workers.clear()
         self._task_owner.clear()
 
-        # 保存状态
-        try:
-            self._save_state()
-        except Exception:
-            log.exception("退出时保存状态失败")
+        # >>> FIX 最新: 不再自动保存状态；只有 save / cancel 命令或任务完成时保存
+        #                这样 Ctrl+C / 异常退出不会写文件
+        # try:
+        #     self._save_state()
+        # except Exception:
+        #     log.exception("退出时保存状态失败")
 
         if self._hook_pool is not None:
             try:
@@ -1556,6 +1639,7 @@ class Scheduler:
 # =========================================================================== #
 # 入口
 # =========================================================================== #
+# >>> FIX 最新: HELP_TEXT 增加 save 命令；cancel 说明改为"保存并退出"
 HELP_TEXT = """
 可用命令:
   status              显示所有任务状态
@@ -1564,7 +1648,8 @@ HELP_TEXT = """
   pause [<task>]      暂停（无任务名 = 全部）
   resume <task>       恢复任务
   update              重新加载配置
-  cancel              取消所有任务并退出
+  save                保存配置文件 + 状态文件（不退出）
+  cancel              保存配置文件 + 状态文件，然后退出
   help                显示帮助
 """.strip()
 

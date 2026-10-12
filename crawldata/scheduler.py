@@ -21,7 +21,7 @@ scheduler.py —— 生产级轻量调度器（单线程版）
   - 循环依赖检测 (启动时)
   - 通知钩子 (on_success/on_fail/on_retry/on_recover/on_skip)
   - 状态持久化 (<cfg>.state.json)
-  - 交互命令: status/tasks/run/pause/resume/update/cancel/help
+  - 交互命令: status/tasks/run/pause/resume/update/save/cancel/help
   - params 支持动态表达式:
       "params": {"k": "v"}                          静态字典
       "params": "module.func(a=1, b='x')"           模块函数，返回 dict
@@ -42,6 +42,12 @@ scheduler.py —— 生产级轻量调度器（单线程版）
       * interval 变化时无条件重算 next_run（新规则立即生效）
       * validate 0→1 恢复时仅补 None 的 next_run，不打乱已跑过任务的节奏
   - print_status / tasks 增加显示 func，便于排查"内存中实际调用的函数"
+
+最新 FIX（本次）:
+  - 状态只保存在内存：删除 _finalize / stop() 里自动写 state 文件
+  - 新增 save 命令：保存 config（start_at 回写）+ state 文件
+  - cancel 命令：保存 config + state，再退出
+  - 其它情况（Ctrl+C、关窗、异常退出）都不写状态文件
 
 用法:
   python scheduler.py <配置文件>
@@ -1150,6 +1156,8 @@ class Scheduler:
         self._thread.start()
         return self
 
+    # >>> FIX 最新: stop() 不再自动写状态文件
+    #                只有 save / cancel 命令会写
     def stop(self, timeout: float = 3) -> None:
         with self._cv:
             running = [t.name for t in self._tasks.values() if t.running]
@@ -1162,10 +1170,11 @@ class Scheduler:
             self._thread.join(timeout)
         self._stop_async_loop()
         self._instances.shutdown()
-        try:
-            self._save_state()
-        except Exception:
-            log.exception("退出时保存状态失败")
+        # >>> FIX 最新: 删除自动保存状态（由 save / cancel 命令显式触发）
+        # try:
+        #     self._save_state()
+        # except Exception:
+        #     log.exception("退出时保存状态失败")
         try:
             self._hook_pool.shutdown(wait=False, cancel_futures=True)
         except TypeError:
@@ -1655,7 +1664,9 @@ class Scheduler:
             base = scheduled_time or now
             task.next_run = advance_to_after(base, task.interval, now)
 
-        self._save_state()
+        # >>> FIX 最新: 不再自动写状态文件；state 保持在内存中
+        #                由 save / cancel 命令显式保存
+        # self._save_state()
         return f"final_{status}"
 
     def _execute(self, task: Task, func: Callable,
@@ -1735,6 +1746,7 @@ class Scheduler:
 # =========================================================================== #
 # 主入口
 # =========================================================================== #
+# >>> FIX 最新: HELP_TEXT 增加 save 命令
 HELP_TEXT = """
 可用命令:
   status              显示所有任务的详细状态
@@ -1743,7 +1755,8 @@ HELP_TEXT = """
   pause <name>        暂停指定任务（validate=0）
   resume <name>       恢复指定任务（validate=1）
   update              重新加载配置文件
-  cancel              取消所有任务和调度计划并退出
+  save                保存配置文件和状态文件（不退出）
+  cancel              保存配置和状态文件，取消所有任务并退出
   help                显示此帮助
   直接回车             无操作
 """.strip()
@@ -1785,6 +1798,23 @@ def sch_main():
 
     sch.start()
 
+    # >>> FIX 最新: 抽出一个保存动作，save / cancel 命令共用
+    def _do_save():
+        """保存 config（start_at 回写）+ state 文件"""
+        try:
+            n = sch.save_start_at_to_config()
+            if n > 0:
+                print(f"已回写 {n} 个任务的 start_at 到配置文件")
+            else:
+                print("无需回写 start_at")
+        except Exception:
+            log.exception("回写 start_at 失败")
+        try:
+            sch._save_state()
+            print(f"已保存状态文件: {sch._state_file}")
+        except Exception:
+            log.exception("保存状态失败")
+
     print()
     print("=" * 70)
     print(f"调度器已启动 | 配置: {config_path}")
@@ -1809,16 +1839,14 @@ def sch_main():
             if line == "update":
                 sch.request_reload()
                 print("已通知调度器重载配置")
+            # >>> FIX 最新: 新增 save 命令：保存 config + state，不退出
+            elif line == "save":
+                print("正在保存...")
+                _do_save()
             elif line == "cancel":
                 print("正在取消所有任务和调度计划...")
-                try:
-                    n = sch.save_start_at_to_config()
-                    if n > 0:
-                        print(f"已回写 {n} 个任务的 start_at 到配置文件")
-                    else:
-                        print("无需回写 start_at")
-                except Exception:
-                    log.exception("回写 start_at 失败")
+                # >>> FIX 最新: cancel 也保存 config + state
+                _do_save()
                 break
             elif line == "status":
                 sch.print_status()
@@ -1851,8 +1879,9 @@ def sch_main():
             else:
                 print("无效命令。输入 help 查看帮助")
     except KeyboardInterrupt:
-        print("\n收到中断信号，退出...")
+        print("\n收到中断信号，退出（不保存状态文件）...")
     finally:
+        # >>> FIX 最新: stop() 内部不再保存 state 文件
         sch.stop(timeout=3)
         print("调度器已退出")
 

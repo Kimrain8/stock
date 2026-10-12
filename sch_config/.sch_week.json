@@ -29,14 +29,13 @@
       "params": "conditionFunc.get_ak_company_params()"
     },
     {
-      "name": "fetch_week_data",
-      "func": "reflush_watchlist:fetch_week_data",
+      "name": "get_ak_dividend",
+      "func": "aks:get_ak_dividend",
       "interval": null,
-      "start_at": null,
-      "validate": 0,
-      "deps": [],
-      "condition": {"func": "conditionFunc:always_true", "params": {}},
-      "params": {}
+      "start_at": 0,
+      "validate": 1,
+	  "deps": [],
+      "params": "conditionFunc.get_ak_dividend_params()"
     }
   ]
 }
