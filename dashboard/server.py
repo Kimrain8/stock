@@ -18,6 +18,7 @@ from .scan import build_scan
 from .analysis_page import build_analysis_page
 from .data_explorer import build_data_explorer
 from .data_workbench import build_data_workbench
+from .data_studio import build_data_studio
 
 setup_logging()
 logger = logging.getLogger("stock2.server")
@@ -121,6 +122,7 @@ async def logout(request: Request):
     resp.delete_cookie(settings.SESSION_COOKIE)
     return resp
 
+
 # ============================================================
 # 首页
 # ============================================================
@@ -131,9 +133,11 @@ HOME_HTML = Template("""<!doctype html>
   <title>Stock2</title>
   <style>
     body { font-family: system-ui, sans-serif; background: #f9fafb; padding: 40px;
-           max-width: 720px; margin: 0 auto; color: #111; }
+           max-width: 1280px; margin: 0 auto; color: #111; }
     h1 { font-size: 26px; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 24px; }
+    /* ★ 一行 4 个卡片 */
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr);
+            gap: 16px; margin-top: 24px; }
     .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
             padding: 20px; text-decoration: none; color: inherit;
             transition: .15s; }
@@ -142,6 +146,10 @@ HOME_HTML = Template("""<!doctype html>
     .card p { margin: 0; color: #6b7280; font-size: 13px; }
     .topbar { display: flex; justify-content: space-between; align-items: center; }
     .logout { color: #6b7280; font-size: 13px; }
+    /* 小屏适配 */
+    @media (max-width: 1024px) {
+      .grid { grid-template-columns: repeat(2, 1fr); }
+    }
   </style>
 </head>
 <body>
@@ -155,16 +163,8 @@ HOME_HTML = Template("""<!doctype html>
       <h2>📈 K线展示</h2>
       <p>K 线 + 成交量 + 换手率交互分析</p>
     </a>
-    <a class="card" href="$api_docs">
-      <h2>🔌 API 文档</h2>
-      <p>REST 与 WebSocket 接口调试</p>
-    </a>
-    <a class="card" href="javascript:void(0)" onclick="testWs()">
-      <h2>🔔 WebSocket 测试</h2>
-      <p>点击向 $ws_path 发送一条消息</p>
-    </a>
     <a class="card" href="$trend">
-      <h2>📈 趋势探索</h2>
+      <h2>📉 趋势探索</h2>
       <p>均价区间 · 连续涨跌天数</p>
     </a>
     <a class="card" href="$scan">
@@ -182,6 +182,14 @@ HOME_HTML = Template("""<!doctype html>
     <a class="card" href="$workbench">
       <h2>🧪 数据工作台</h2>
       <p>IPython 风格 · 5 个数据源 · 代码操作 DataFrame</p>
+    </a>
+    <a class="card" href="$data_studio">
+      <h2>🎨 数据可视化</h2>
+      <p>拖拽式图表生成 · 自由布局</p>
+    </a>
+    <a class="card" href="$api_docs">
+      <h2>🔌 API 文档</h2>
+      <p>REST 与 WebSocket 接口调试</p>
     </a>
   </div>
   <script>
@@ -206,18 +214,24 @@ async def home(request: Request):
         trend=getattr(settings, "TREND_PATH", "/trend"),
         scan=settings.SCAN_PATH,
         analysis=settings.ANALYSIS_PATH,
-        data_explorer=settings.DATA_EXPLORER_PATH,   # ← 新增
+        data_explorer=settings.DATA_EXPLORER_PATH,
         workbench=settings.WORKBENCH_PATH,
+        data_studio=settings.DATA_STUDIO_PATH,       # ← 新增
         api_docs=f"{settings.REST_API_PREFIX}/docs",
         ws_path=settings.WS_API_PATH,
     )
 
-########权限管理端点（仅 admin）
+
+# ============================================================
+# 权限管理端点（仅 admin）
+# ============================================================
 from .permissions import engine as perm_engine
+
 def _require_admin(request: Request):
     if getattr(request.state, "role", None) != "admin":
         return JSONResponse({"error": "forbidden"}, status_code=403)
     return None
+
 @app.get(f"{settings.REST_API_PREFIX}/admin/permissions")
 async def list_permissions(request: Request):
     err = _require_admin(request)
@@ -231,6 +245,7 @@ async def list_permissions(request: Request):
         "FROM permissions ORDER BY subject_type, subject, priority"
     )
     return df.to_dict(orient="records")
+
 @app.post(f"{settings.REST_API_PREFIX}/admin/permissions/invalidate")
 async def invalidate_permissions(
     request: Request,
@@ -242,6 +257,7 @@ async def invalidate_permissions(
         return err
     perm_engine.invalidate(subject_type, subject)
     return {"ok": True, "scope": f"{subject_type}:{subject}" if subject else "all"}
+
 @app.post(f"{settings.REST_API_PREFIX}/admin/sessions/purge")
 async def purge_sessions(request: Request):
     err = _require_admin(request)
@@ -258,17 +274,20 @@ explorer_app = build_explorer()
 trend_app = build_trend()
 scan_app = build_scan()
 analysis_app = build_analysis_page()
-data_explorer_app = build_data_explorer()   # ← 新增
+data_explorer_app = build_data_explorer()
 workbench_app = build_data_workbench()
+data_studio_app = build_data_studio()
+
 add_applications(
     {
         settings.EXPLORER_PATH: explorer_app,
         settings.TREND_PATH: trend_app,
         settings.SCAN_PATH: scan_app,
         settings.ANALYSIS_PATH: analysis_app,
-        settings.DATA_EXPLORER_PATH: data_explorer_app,   # ← 新增
+        settings.DATA_EXPLORER_PATH: data_explorer_app,
         settings.WORKBENCH_PATH: workbench_app,
-    }, 
+        settings.DATA_STUDIO_PATH: data_studio_app,   # ← 新增
+    },
     app=app
 )
 logger.info("Panel mounted at %s", settings.EXPLORER_PATH)
@@ -298,22 +317,3 @@ if __name__ == "__main__":
         access_log=False,
         **ssl_kwargs,
     )
-#   uvicorn.run(
-#       "dashboard.server:app",
-#       host=settings.HOST,
-#       port=settings.PORT,
-#       reload=False,
-#       **ssl_kwargs,
-#   )
-  
-  #region 清理session
-  # import threading, time
-  # def _purge_loop():
-  #     while True:
-  #         time.sleep(3600)
-  #         try:
-  #             sessions.purge_expired()
-  #         except Exception:
-  #             pass
-  # threading.Thread(target=_purge_loop, daemon=True).start()
-  #endregion

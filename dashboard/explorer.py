@@ -1,11 +1,11 @@
-"""Panel 数据探索器 — 仿腾讯股票风格"""
+"""Panel 数据探索器 — 仿腾讯股票风格(Bokeh 原生版，多 tab 并发安全)"""
 import logging
 
 import numpy as np
 import pandas as pd
 import panel as pn
-import hvplot.pandas  # noqa: F401  必须导入以注册 .hvplot 访问器
-import holoviews as hv
+from bokeh.plotting import figure
+from bokeh.models import ColumnDataSource, Range1d, HoverTool
 
 from .auth import sessions
 from .config import settings
@@ -54,11 +54,11 @@ def _apply_period(df: pd.DataFrame, period: str) -> pd.DataFrame:
     if period in ("分时", "五日"):
         return pd.DataFrame()
     if period == "日K":
-        return df.tail(300)          # 原来 500，收紧到 300
+        return df.tail(300)
     if period == "1年":
         return df.tail(250)
     if period == "周K":
-        return _resample_ohlc(df, "W-FRI").tail(200)   # 加 tail
+        return _resample_ohlc(df, "W-FRI").tail(200)
     if period == "月K":
         return _resample_ohlc(df, "ME").tail(60)
     if period == "3年":
@@ -66,6 +66,7 @@ def _apply_period(df: pd.DataFrame, period: str) -> pd.DataFrame:
     if period == "5年":
         return _resample_ohlc(df, "ME").tail(60)
     return df
+
 
 def _calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """计算 MA5/10/20、量均线、MACD。"""
@@ -88,7 +89,7 @@ def _calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
-# 图表构建
+# 通用工具
 # ============================================================
 # A 股风格：涨红跌绿
 RED = "#e53935"
@@ -98,92 +99,249 @@ MA_COLORS = {"ma5": "#ff9800", "ma10": "#2196f3", "ma20": "#9c27b0"}
 VMA_COLORS = {"vma5": "#ff9800", "vma10": "#2196f3"}
 
 
-def _build_main_chart(df: pd.DataFrame, title: str) -> hv.Overlay:
-    """K 线 + MA 均线。"""
-    kline = df.hvplot.ohlc(
-        ylabel="价格",
-        grid=True,
+def _ensure_date_col(df: pd.DataFrame) -> pd.DataFrame:
+    """把 date 列标准化，确保是 datetime 类型、升序、列名是 'date'。
+
+    同时把所有数值列统一转成 float64，避免 Decimal / object 类型
+    导致 Bokeh ColumnDataSource 序列化失败。
+    """
+    d = df.copy()
+    if "date" not in d.columns:
+        d.index.name = "date"
+        d = d.reset_index()
+    d["date"] = pd.to_datetime(d["date"])
+    d = d.sort_values("date").reset_index(drop=True)
+
+    # ★ 关键：把所有非 date、非字符串的列转成 float64
+    for col in d.columns:
+        if col == "date":
+            continue
+        # Decimal / object / int / float 统一转 float64
+        # 遇到无法转换的（如字符串），用 to_numeric 并忽略错误
+        try:
+            d[col] = pd.to_numeric(d[col], errors="coerce").astype(np.float64)
+        except Exception:
+            # 无法转换的列（如字符串列）跳过
+            pass
+
+    return d
+
+
+def _calc_bar_width_ms(df: pd.DataFrame, ratio: float = 0.7) -> float:
+    """根据相邻日期中位间隔，算出柱子的宽度（毫秒）。"""
+    if len(df) < 2:
+        return 86400000 * 0.7
+    gaps = df["date"].diff().dt.total_seconds().dropna()
+    median_gap = float(gaps.median()) if len(gaps) else 86400.0
+    if not np.isfinite(median_gap) or median_gap <= 0:
+        median_gap = 86400.0
+    return median_gap * 1000.0 * ratio
+
+
+# ============================================================
+# 图 1：K 线 + MA 均线
+# ============================================================
+def _build_main_chart(df: pd.DataFrame, title: str,
+                      x_range: Range1d | None = None):
+    d = _ensure_date_col(df)
+    if d.empty:
+        return None
+
+    inc = d["close"] >= d["open"]
+    dec = ~inc
+
+    bar_width = _calc_bar_width_ms(d)
+
+    fig = figure(
+        height=620,
         title=title,
-        tools=["hover", "box_zoom", "reset", "xwheel_zoom"],
-        hover_cols=["open", "high", "low", "close", "volume",
-                    "ma5", "ma10", "ma20"],
-        pos_color=RED,
-        neg_color=GREEN,
-        line_color="#333333",
-        bar_width=0.7,
-        legend=False,
+        x_axis_type="datetime",
+        tools="pan,box_zoom,reset,xwheel_zoom",
+        toolbar_location="above",
     )
-    mas = df.hvplot.line(
-        y=["ma5", "ma10", "ma20"],
-        color=[MA_COLORS["ma5"], MA_COLORS["ma10"], MA_COLORS["ma20"]],
-        line_width=1.3,
-        hover=False,
-        legend="top_left",
-    )
-    return (kline * mas).opts(
-        frame_height=620,             # 只设高度
-        show_legend=True,
-        fontsize={"title": 14, "labels": 11},
-    )
+    if x_range is not None:
+        fig.x_range = x_range
+    fig.yaxis.axis_label = "价格"
+    fig.grid.grid_line_alpha = 0.3
 
+    # ---- 影线 ----
+    for mask, color in [(inc, RED), (dec, GREEN)]:
+        sub = d[mask]
+        if not sub.empty:
+            src_sub = ColumnDataSource(sub.reset_index(drop=True))
+            fig.segment(
+                x0="date", y0="high",
+                x1="date", y1="low",
+                source=src_sub,
+                color=color, line_width=1,
+            )
 
-def _build_volume_chart(df: pd.DataFrame) -> hv.Overlay:
-    """成交量柱 + 量均线。"""
-    plot_df = df.reset_index()
-    date_col = plot_df.columns[0]
+    # ---- 实体：拆成涨/跌两份 CDS ----
+    src_up = ColumnDataSource(d[inc].reset_index(drop=True))
+    src_dn = ColumnDataSource(d[dec].reset_index(drop=True))
 
-    up_df = plot_df[plot_df["up"]]
-    down_df = plot_df[~plot_df["up"]]
-
-    common = dict(
-        x=date_col, y="volume", ylabel="成交量",
-        tools=["hover"], hover_cols=["volume", "vma5", "vma10"],
-        legend=False,
+    r_up = fig.vbar(
+        x="date", width=bar_width, top="close", bottom="open",
+        source=src_up, fill_color=RED, line_color=RED, alpha=0.9,
     )
-    bars_up = up_df.hvplot.bar(color=RED, alpha=0.75, **common)
-    bars_down = down_df.hvplot.bar(color=GREEN, alpha=0.75, **common)
-    vma = plot_df.hvplot.line(
-        x=date_col, y=["vma5", "vma10"],
-        color=[VMA_COLORS["vma5"], VMA_COLORS["vma10"]],
-        line_width=1.1, legend="top_left", hover=False,
-    )
-    return (bars_up * bars_down * vma).opts(
-        frame_height=260,
-        show_legend=True,
-        fontsize={"labels": 10},
+    r_dn = fig.vbar(
+        x="date", width=bar_width, top="open", bottom="close",
+        source=src_dn, fill_color=GREEN, line_color=GREEN, alpha=0.9,
     )
 
+    # ---- MA 均线 ----
+    src_all = ColumnDataSource(d)
+    fig.line("date", "ma5", source=src_all,
+             color=MA_COLORS["ma5"], line_width=1.3, legend_label="MA5")
+    fig.line("date", "ma10", source=src_all,
+             color=MA_COLORS["ma10"], line_width=1.3, legend_label="MA10")
+    fig.line("date", "ma20", source=src_all,
+             color=MA_COLORS["ma20"], line_width=1.3, legend_label="MA20")
 
-def _build_macd_chart(df: pd.DataFrame) -> hv.Overlay:
-    """MACD 柱 + DIF/DEA 线。"""
-    plot_df = df.reset_index()
-    date_col = plot_df.columns[0]
+    # ---- Hover ----
+    fig.add_tools(HoverTool(
+        renderers=[r_up, r_dn],
+        tooltips=[
+            ("日期", "@date{%F}"),
+            ("开",   "@open{0.00}"),
+            ("高",   "@high{0.00}"),
+            ("低",   "@low{0.00}"),
+            ("收",   "@close{0.00}"),
+            ("量",   "@volume{0,0}"),
+        ],
+        formatters={"@date": "datetime"},
+    ))
 
-    up_df = plot_df[plot_df["macd"] >= 0]
-    down_df = plot_df[plot_df["macd"] < 0]
+    fig.legend.orientation = "horizontal"
+    fig.legend.location = "top_left"
+    fig.legend.click_policy = "hide"
+    fig.add_layout(fig.legend[0], "above")
+    return fig
 
-    common = dict(
-        x=date_col, y="macd", ylabel="MACD",
-        tools=["hover"], hover_cols=["dif", "dea", "macd"],
-        legend=False,
+
+# ============================================================
+# 图 2：成交量柱 + 量均线
+# ============================================================
+def _build_volume_chart(df: pd.DataFrame,
+                        x_range: Range1d | None = None):
+    d = _ensure_date_col(df)
+    if d.empty:
+        return None
+
+    inc = d["close"] >= d["open"]
+    dec = ~inc
+
+    bar_width = _calc_bar_width_ms(d)
+
+    fig = figure(
+        height=260,
+        x_axis_type="datetime",
+        tools="pan,box_zoom,reset,xwheel_zoom",
+        toolbar_location="above",
     )
-    bars_up = up_df.hvplot.bar(color=RED, alpha=0.75, **common)
-    bars_down = down_df.hvplot.bar(color=GREEN, alpha=0.75, **common)
-    dif_line = plot_df.hvplot.line(
-        x=date_col, y="dif", color="#ff9800",
-        line_width=1.2, legend="top_left", hover=False,
+    if x_range is not None:
+        fig.x_range = x_range
+    fig.yaxis.axis_label = "成交量"
+    fig.grid.grid_line_alpha = 0.3
+
+    src_up = ColumnDataSource(d[inc].reset_index(drop=True))
+    src_dn = ColumnDataSource(d[dec].reset_index(drop=True))
+
+    r_up = fig.vbar(
+        x="date", width=bar_width, top="volume", bottom=0,
+        source=src_up, fill_color=RED, line_color=RED, alpha=0.75,
     )
-    dea_line = plot_df.hvplot.line(
-        x=date_col, y="dea", color="#9c27b0",
-        line_width=1.2, legend="top_left", hover=False,
-    )
-    return (bars_up * bars_down * dif_line * dea_line).opts(
-        frame_height=260,
-        show_legend=True,
-        fontsize={"labels": 10},
+    r_dn = fig.vbar(
+        x="date", width=bar_width, top="volume", bottom=0,
+        source=src_dn, fill_color=GREEN, line_color=GREEN, alpha=0.75,
     )
 
+    src_all = ColumnDataSource(d)
+    fig.line("date", "vma5", source=src_all,
+             color=VMA_COLORS["vma5"], line_width=1.1, legend_label="VMA5")
+    fig.line("date", "vma10", source=src_all,
+             color=VMA_COLORS["vma10"], line_width=1.1, legend_label="VMA10")
 
+    fig.add_tools(HoverTool(
+        renderers=[r_up, r_dn],
+        tooltips=[
+            ("日期",   "@date{%F}"),
+            ("成交量", "@volume{0,0}"),
+        ],
+        formatters={"@date": "datetime"},
+    ))
+
+    fig.legend.orientation = "horizontal"
+    fig.legend.location = "top_left"
+    fig.legend.click_policy = "hide"
+    fig.add_layout(fig.legend[0], "above")
+    return fig
+
+
+# ============================================================
+# 图 3：MACD 柱 + DIF/DEA
+# ============================================================
+def _build_macd_chart(df: pd.DataFrame,
+                      x_range: Range1d | None = None):
+    d = _ensure_date_col(df)
+    if d.empty:
+        return None
+
+    up = d["macd"] >= 0
+    dn = ~up
+
+    bar_width = _calc_bar_width_ms(d)
+
+    fig = figure(
+        height=260,
+        x_axis_type="datetime",
+        tools="pan,box_zoom,reset,xwheel_zoom",
+        toolbar_location="above",
+    )
+    if x_range is not None:
+        fig.x_range = x_range
+    fig.yaxis.axis_label = "MACD"
+    fig.grid.grid_line_alpha = 0.3
+
+    src_up = ColumnDataSource(d[up].reset_index(drop=True))
+    src_dn = ColumnDataSource(d[dn].reset_index(drop=True))
+
+    r_up = fig.vbar(
+        x="date", width=bar_width, top="macd", bottom=0,
+        source=src_up, fill_color=RED, line_color=RED, alpha=0.75,
+    )
+    r_dn = fig.vbar(
+        x="date", width=bar_width, top="macd", bottom=0,
+        source=src_dn, fill_color=GREEN, line_color=GREEN, alpha=0.75,
+    )
+
+    src_all = ColumnDataSource(d)
+    fig.line("date", "dif", source=src_all,
+             color="#ff9800", line_width=1.2, legend_label="DIF")
+    fig.line("date", "dea", source=src_all,
+             color="#9c27b0", line_width=1.2, legend_label="DEA")
+
+    fig.add_tools(HoverTool(
+        renderers=[r_up, r_dn],
+        tooltips=[
+            ("日期", "@date{%F}"),
+            ("MACD", "@macd{0.000}"),
+            ("DIF",  "@dif{0.000}"),
+            ("DEA",  "@dea{0.000}"),
+        ],
+        formatters={"@date": "datetime"},
+    ))
+
+    fig.legend.orientation = "horizontal"
+    fig.legend.location = "top_left"
+    fig.legend.click_policy = "hide"
+    fig.add_layout(fig.legend[0], "above")
+    return fig
+
+
+# ============================================================
+# 信息栏
+# ============================================================
 def _build_info_bar(df: pd.DataFrame) -> str:
     """顶部的开/高/低/收/涨跌/时间信息。"""
     if df.empty:
@@ -234,6 +392,11 @@ def build_explorer():
             )
 
         # ---------- 顶部工具栏 ----------
+        filter_input = pn.widgets.TextInput(
+            name="搜索",
+            placeholder="输入关键字过滤",
+            width=140,
+        )
         symbol_select = pn.widgets.Select(
             name="股票", options=symbols, value=symbols[0], width=180,
         )
@@ -242,17 +405,39 @@ def build_explorer():
             options=["分时", "五日", "日K", "周K", "月K", "1年", "3年", "5年"],
             value="日K",
             button_type="default",
-            sizing_mode="stretch_width",     # ← 改这个
+            width=520,
         )
 
         # ---------- 显示区 ----------
+        # 用 Bokeh 原生容器，高度由 Bokeh figure 内部设置
         info_pane = pn.pane.HTML(min_height=48, sizing_mode="stretch_width")
-        main_pane = pn.pane.HoloViews(sizing_mode="stretch_width")   # ← 只用 stretch_width
-        vol_pane  = pn.pane.HoloViews(sizing_mode="stretch_width")
-        macd_pane = pn.pane.HoloViews(sizing_mode="stretch_width")
+        main_pane = pn.pane.Bokeh(sizing_mode="stretch_width")
+        vol_pane  = pn.pane.Bokeh(sizing_mode="stretch_width")
+        macd_pane = pn.pane.Bokeh(sizing_mode="stretch_width")
+
+        # ---------- 搜索过滤（同 trend 页面逻辑） ----------
+        def on_filter(event):
+            kw = (event.new or "").strip().lower()
+            if kw:
+                filtered = [s for s in symbols if kw in s.lower()]
+            else:
+                filtered = symbols
+            current = symbol_select.value
+            symbol_select.options = filtered
+            if current not in filtered:
+                symbol_select.value = None
+
+        filter_input.param.watch(on_filter, "value")
+
         # ---------- 更新逻辑 ----------
         def update(symbol, period):
             if not symbol:
+                info_pane.object = (
+                    "<div style='color:#888;padding:8px'>请选择股票</div>"
+                )
+                main_pane.object = None
+                vol_pane.object = None
+                macd_pane.object = None
                 return
             try:
                 if period in ("分时", "五日"):
@@ -290,9 +475,21 @@ def build_explorer():
                 info_pane.object = _build_info_bar(df)
                 name = get_stock_name(symbol)
                 title = f"{symbol} {name} · {period}".strip()
-                main_pane.object = _build_main_chart(df, title) #更改图像标题
-                vol_pane.object = _build_volume_chart(df)
-                macd_pane.object = _build_macd_chart(df)
+
+                # ★ 三图共享 x_range → 拖动/缩放联动
+                # 用数据实际范围初始化，避免 Range1d() 空范围显示 1970
+                _d = _ensure_date_col(df)
+                if not _d.empty:
+                    x_range = Range1d(
+                        start=_d["date"].iloc[0].to_pydatetime(),
+                        end=_d["date"].iloc[-1].to_pydatetime(),
+                    )
+                else:
+                    x_range = Range1d()
+
+                main_pane.object = _build_main_chart(df, title, x_range)
+                vol_pane.object = _build_volume_chart(df, x_range)
+                macd_pane.object = _build_macd_chart(df, x_range)
             except Exception as e:
                 logger.exception("chart update failed")
                 info_pane.object = (
@@ -300,8 +497,8 @@ def build_explorer():
                 )
 
         pn.bind(update, symbol_select, period_tabs, watch=True)
-        update(symbol_select.value, period_tabs.value)   # ← 加这一行
-        
+        update(symbol_select.value, period_tabs.value)
+
         # ---------- 布局 ----------
         header = pn.Row(
             pn.pane.Markdown(
@@ -313,8 +510,10 @@ def build_explorer():
         )
 
         toolbar = pn.Row(
+            filter_input,
+            pn.Spacer(width=8),
             symbol_select,
-            pn.Spacer(width=12),
+            pn.Spacer(width=8),
             period_tabs,
             sizing_mode="stretch_width",
         )

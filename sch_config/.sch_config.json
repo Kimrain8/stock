@@ -22,7 +22,7 @@
       "name": "get_trade_calendar",
       "func": "ts:get_trade_calendar",
       "interval": "D_1",
-      "start_at": "2026-10-13 17:16:00",
+      "start_at": "2026-10-15 18:04:00",
       "validate": 1,
       "deps": [],
       "params": {}
@@ -70,8 +70,8 @@
       "interval": 0,
       "start_at": null,
       "validate": 1,
-      "retry": 3,
-      "retry_backoff": [2, 3, 5],
+      "retry": 4,
+      "retry_backoff": [2, 4, 5,3],
       "deps": ["fetch_getRank_db"],
       "params": {}
     },
@@ -108,7 +108,7 @@
       "interval": 0,
       "start_at": null,
       "validate": 1,
-      "deps": ["fetch_ak_companyinfo"],
+      "deps": ["get_ak_dividend"],
       "params": "conditionFunc.get_ak_dividend_params()"
     },
     {

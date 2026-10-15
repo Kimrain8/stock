@@ -31,7 +31,7 @@ akshare==1.18.64
 ©¦   ©¦   ©¸©¤©¤ six [required: >=1.5, installed: 1.17.0]
 ©¦   ©¸©¤©¤ tzdata [required: Any, installed: 2026.4]
 ©À©¤©¤ requests [required: >=2.22.0, installed: 2.34.2]
-©¦   ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.1]
+©¦   ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.2]
 ©¦   ©À©¤©¤ idna [required: >=2.5,<4, installed: 3.20]
 ©¦   ©À©¤©¤ urllib3 [required: >=1.26,<3, installed: 2.8.0]
 ©¦   ©¸©¤©¤ certifi [required: >=2023.5.7, installed: 2026.7.22]
@@ -155,7 +155,7 @@ Crawl4AI==0.8.6
 ©¦   ©À©¤©¤ tiktoken [required: >=0.7.0, installed: 0.13.0]
 ©¦   ©¦   ©À©¤©¤ regex [required: Any, installed: 2026.5.9]
 ©¦   ©¦   ©¸©¤©¤ requests [required: Any, installed: 2.34.2]
-©¦   ©¦       ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.1]
+©¦   ©¦       ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.2]
 ©¦   ©¦       ©À©¤©¤ idna [required: >=2.5,<4, installed: 3.20]
 ©¦   ©¦       ©À©¤©¤ urllib3 [required: >=1.26,<3, installed: 2.8.0]
 ©¦   ©¦       ©¸©¤©¤ certifi [required: >=2023.5.7, installed: 2026.7.22]
@@ -236,7 +236,7 @@ Crawl4AI==0.8.6
 ©¦   ©¸©¤©¤ greenlet [required: >=3.1.1,<4.0.0, installed: 3.5.1]
 ©À©¤©¤ python-dotenv [required: ~=1.0, installed: 1.2.3]
 ©À©¤©¤ requests [required: ~=2.26, installed: 2.34.2]
-©¦   ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.1]
+©¦   ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.2]
 ©¦   ©À©¤©¤ idna [required: >=2.5,<4, installed: 3.20]
 ©¦   ©À©¤©¤ urllib3 [required: >=1.26,<3, installed: 2.8.0]
 ©¦   ©¸©¤©¤ certifi [required: >=2023.5.7, installed: 2026.7.22]
@@ -401,7 +401,7 @@ hvplot==0.12.2
 ©¦   ©¦   ©À©¤©¤ pyviz_comms [required: >=2.0.0, installed: 3.0.6]
 ©¦   ©¦   ©¦   ©¸©¤©¤ param [required: Any, installed: 2.4.2]
 ©¦   ©¦   ©À©¤©¤ requests [required: Any, installed: 2.34.2]
-©¦   ©¦   ©¦   ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.1]
+©¦   ©¦   ©¦   ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.2]
 ©¦   ©¦   ©¦   ©À©¤©¤ idna [required: >=2.5,<4, installed: 3.20]
 ©¦   ©¦   ©¦   ©À©¤©¤ urllib3 [required: >=1.26,<3, installed: 2.8.0]
 ©¦   ©¦   ©¦   ©¸©¤©¤ certifi [required: >=2023.5.7, installed: 2026.7.22]
@@ -466,7 +466,7 @@ hvplot==0.12.2
 ©¦   ©À©¤©¤ pyviz_comms [required: >=2.0.0, installed: 3.0.6]
 ©¦   ©¦   ©¸©¤©¤ param [required: Any, installed: 2.4.2]
 ©¦   ©À©¤©¤ requests [required: Any, installed: 2.34.2]
-©¦   ©¦   ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.1]
+©¦   ©¦   ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.2]
 ©¦   ©¦   ©À©¤©¤ idna [required: >=2.5,<4, installed: 3.20]
 ©¦   ©¦   ©À©¤©¤ urllib3 [required: >=1.26,<3, installed: 2.8.0]
 ©¦   ©¦   ©¸©¤©¤ certifi [required: >=2023.5.7, installed: 2026.7.22]
@@ -540,6 +540,14 @@ mplfinance==0.12.10b0
     ©¦   ©¸©¤©¤ six [required: >=1.5, installed: 1.17.0]
     ©¸©¤©¤ tzdata [required: Any, installed: 2026.4]
 mysql-connector-python==26.7.0
+Naked==0.1.32
+©À©¤©¤ requests [required: Any, installed: 2.34.2]
+©¦   ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.2]
+©¦   ©À©¤©¤ idna [required: >=2.5,<4, installed: 3.20]
+©¦   ©À©¤©¤ urllib3 [required: >=1.26,<3, installed: 2.8.0]
+©¦   ©¸©¤©¤ certifi [required: >=2023.5.7, installed: 2026.7.22]
+©¸©¤©¤ PyYAML [required: Any, installed: 6.0.3]
+pycryptodome==3.24.0
 pypdf==6.12.2
 PySocks==1.7.1
 python-multipart==0.0.32
@@ -584,13 +592,13 @@ Scrapy==2.16.0
 ©À©¤©¤ tldextract [required: Any, installed: 5.3.1]
 ©¦   ©À©¤©¤ idna [required: Any, installed: 3.20]
 ©¦   ©À©¤©¤ requests [required: >=2.1.0, installed: 2.34.2]
-©¦   ©¦   ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.1]
+©¦   ©¦   ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.2]
 ©¦   ©¦   ©À©¤©¤ idna [required: >=2.5,<4, installed: 3.20]
 ©¦   ©¦   ©À©¤©¤ urllib3 [required: >=1.26,<3, installed: 2.8.0]
 ©¦   ©¦   ©¸©¤©¤ certifi [required: >=2023.5.7, installed: 2026.7.22]
 ©¦   ©À©¤©¤ requests-file [required: >=1.4, installed: 3.0.1]
 ©¦   ©¦   ©¸©¤©¤ requests [required: >=1.0.0, installed: 2.34.2]
-©¦   ©¦       ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.1]
+©¦   ©¦       ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.2]
 ©¦   ©¦       ©À©¤©¤ idna [required: >=2.5,<4, installed: 3.20]
 ©¦   ©¦       ©À©¤©¤ urllib3 [required: >=1.26,<3, installed: 2.8.0]
 ©¦   ©¦       ©¸©¤©¤ certifi [required: >=2023.5.7, installed: 2026.7.22]
@@ -756,6 +764,8 @@ sentence-transformers==5.5.1
 ©À©¤©¤ typing_extensions [required: >=4.5.0, installed: 4.16.0]
 ©¸©¤©¤ tqdm [required: >=4.0.0, installed: 4.70.1]
     ©¸©¤©¤ colorama [required: Any, installed: 0.4.6]
+shellescape==3.8.1
+stock2==0.1.0
 tushare==1.4.29
 ©À©¤©¤ pandas [required: Any, installed: 3.0.6]
 ©¦   ©À©¤©¤ numpy [required: >=1.26.0, installed: 2.4.6]
@@ -763,7 +773,7 @@ tushare==1.4.29
 ©¦   ©¦   ©¸©¤©¤ six [required: >=1.5, installed: 1.17.0]
 ©¦   ©¸©¤©¤ tzdata [required: Any, installed: 2026.4]
 ©À©¤©¤ requests [required: Any, installed: 2.34.2]
-©¦   ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.1]
+©¦   ©À©¤©¤ charset-normalizer [required: >=2,<4, installed: 3.5.2]
 ©¦   ©À©¤©¤ idna [required: >=2.5,<4, installed: 3.20]
 ©¦   ©À©¤©¤ urllib3 [required: >=1.26,<3, installed: 2.8.0]
 ©¦   ©¸©¤©¤ certifi [required: >=2023.5.7, installed: 2026.7.22]

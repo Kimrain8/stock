@@ -1,0 +1,6 @@
+[project]
+name = "stock2"
+version = "0.1.0"
+
+[tool.setuptools.packages.find]
+include = ["dashboard*"]

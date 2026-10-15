@@ -30,8 +30,13 @@ bokeh-fastapi = "*"
 hvplot = "*"
 lightgbm = "*"
 pycryptodome = "*"
+panel-tiles = "*"
+pygwalker = "*"
 
 [dev-packages]
 
 [requires]
 python_version = "3.11"
+
+[scripts]
+server = "python -m dashboard.server"

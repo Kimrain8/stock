@@ -36,6 +36,7 @@ class Settings:
         self.ANALYSIS_PATH = os.getenv("APP_ANALYSIS_PATH", "/analysis")
         self.DATA_EXPLORER_PATH = os.getenv("APP_DATA_EXPLORER_PATH", "/data-explorer")
         self.WORKBENCH_PATH = os.getenv("APP_WORKBENCH_PATH", "/workbench")
+        self.DATA_STUDIO_PATH = os.getenv("APP_DATA_STUDIO_PATH", "/studio")     # ← 新增
         
         self.HOME_PATH = "/"
         self.LOGIN_PATH = "/login"

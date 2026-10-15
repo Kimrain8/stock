@@ -27,6 +27,24 @@ scheduler.py —— 多进程调度器
       * 每个任务完成时（_handle_task_done）继续保存 state（链条推进落盘）
       * 主进程正常关闭时不再自动保存（_shutdown_all 里注释掉）
       * Ctrl+C / 异常退出：不保存
+
+最新 FIX（日志管理优化）:
+  - 配置新增字段：
+      "log_main":   "logs/main.log"      主进程日志文件（相对 cwd）
+      "log_worker": "logs/worker"        Worker 日志目录（相对 cwd）
+    缺省时：<cfg_dir>/logs/main.log 与 <cfg_dir>/logs/worker
+  - 启动模式决定文件名：
+      * 无任务名：main.log / worker/<task>.log（同一日志追加）
+                  主进程对 main.log 加独占锁（main.log.lock）
+                  拿不到锁立即报错退出（防止重复启动）
+      * 有任务名：main_<task>_<stamp>_<hex>.log
+                  worker/<task>_<stamp>_<hex>.log
+                  每个 Worker 独立文件，天然不冲突
+                  stamp = YYYYMMDD_HHMMSS，hex = os.urandom(2).hex()
+                  主进程和所有 Worker 共享同一 batch_id
+  - Worker 日志行前缀：W<worker_pid>@M<main_pid>
+  - 参数传递：主进程 spawn Worker 后立刻通过 Pipe 发 "init" 消息，
+             携带 log_file 和 main_pid；Worker 收到后再初始化日志
 """
 from __future__ import annotations
 
@@ -63,14 +81,29 @@ def get_scheduler() -> "Scheduler":
 # =========================================================================== #
 # 日志
 # =========================================================================== #
-def setup_logging(log_file: str = "scheduler.log", is_worker: bool = False):
+# >>> FIX LOG: setup_logging 增加 main_pid 参数，Worker 前缀 = W<pid>@M<main_pid>
+def setup_logging(log_file: str = "scheduler.log", is_worker: bool = False,
+                  main_pid: Optional[int] = None):
     from logging.handlers import RotatingFileHandler
     logger = logging.getLogger("scheduler")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
-    prefix = f"W{os.getpid()}" if is_worker else "MAIN"
+    if is_worker:
+        prefix = f"W{os.getpid()}"
+        if main_pid:
+            prefix += f"@M{main_pid}"
+    else:
+        prefix = "MAIN"
     fmt = logging.Formatter(
         f"%(asctime)s [{prefix}] [%(levelname)s] %(message)s")
+
+    # 确保父目录存在（防止日志目录被手动删掉）
+    log_dir = os.path.dirname(os.path.abspath(log_file))
+    if log_dir:
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except Exception:
+            pass
 
     fh = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024,
                              backupCount=5, encoding="utf-8")
@@ -505,9 +538,21 @@ class Task:
 # =========================================================================== #
 # Worker 端（子进程）
 # =========================================================================== #
+# >>> FIX LOG: _worker_main 先收 init 消息（含 log_file / main_pid），再初始化日志
 def _worker_main(conn: Connection) -> None:
     """子进程主函数。被动响应主进程的 run_task / shutdown。"""
-    setup_logging(is_worker=True)
+    # 先等 init 消息，拿到日志配置
+    try:
+        init_msg = conn.recv()
+    except EOFError:
+        return
+    if init_msg.get("type") != "init":
+        # 兜底：不是 init，直接退出
+        return
+
+    log_file = init_msg["log_file"]
+    main_pid = init_msg.get("main_pid")
+    setup_logging(log_file=log_file, is_worker=True, main_pid=main_pid)
     wlog = log
     wlog.info("Worker 启动 pid=%d", os.getpid())
 
@@ -831,17 +876,138 @@ class Scheduler:
         self._hook_pool: Optional[ThreadPoolExecutor] = None
         self._notify: Dict[str, str] = {}
 
+        # >>> FIX LOG: 日志相关字段
+        self._manual_mode: bool = False               # 是否带任务名启动
+        self._log_main_cfg: str = "logs/main.log"     # 原始配置值
+        self._log_worker_cfg: str = "logs/worker"     # 原始配置值
+        self._log_main_actual: Optional[str] = None   # 实际主进程日志路径
+        self._log_worker_dir_actual: Optional[str] = None  # 实际 Worker 日志目录
+        self._batch_id: Optional[str] = None          # 手工模式：本次批次标识
+        self._log_lock_fd = None                      # main.log 独占锁 fd
+
     # ------------------------------------------------------------------ #
     # 配置
     # ------------------------------------------------------------------ #
-    def load_config(self, path: str) -> None:
+    # >>> FIX LOG: load_config 新增 manual_mode 参数，解析日志路径
+    def load_config(self, path: str, manual_mode: bool = False,
+                    start_task: Optional[str] = None) -> None:
         self._config_path = os.path.abspath(path)
         base, _ = os.path.splitext(self._config_path)
         self._state_file = base + ".state.json"
+        self._manual_mode = bool(manual_mode)
 
         self._load_state()
         self._reload_config()
-        self._save_state()
+        # >>> FIX LOG: 解析日志路径 + 加锁 / 生成 batch_id（在写状态前）
+        self._setup_logging_paths(start_task=start_task)
+
+    # >>> FIX LOG: 新增 _setup_logging_paths —— 计算实际日志路径、按需加锁
+    def _setup_logging_paths(self, start_task: Optional[str] = None) -> None:
+        """
+        计算 log_main / log_worker 的实际路径，并按启动模式决定是否加锁。
+          - 无任务名：main.log 固定；加独占锁（防重复启动）
+          - 有任务名：加 <stamp>_<hex> 后缀；不加锁
+        """
+        cfg_dir = os.path.dirname(self._config_path) or os.getcwd()
+
+        # 1. 决定基础路径（相对 cwd / 绝对路径两种都支持）
+        log_main = self._log_main_cfg or "logs/main.log"
+        log_worker = self._log_worker_cfg or "logs/worker"
+
+        if not os.path.isabs(log_main):
+            log_main = os.path.join(os.getcwd(), log_main)
+        if not os.path.isabs(log_worker):
+            log_worker = os.path.join(os.getcwd(), log_worker)
+
+        # 缺省值：<cfg_dir>/logs/...（配置为空时使用）
+        if not self._log_main_cfg:
+            log_main = os.path.join(cfg_dir, "logs", "main.log")
+        if not self._log_worker_cfg:
+            log_worker = os.path.join(cfg_dir, "logs", "worker")
+
+        # 2. 按启动模式生成最终文件名
+        if self._manual_mode:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            hex4 = os.urandom(2).hex()
+            self._batch_id = f"{stamp}_{hex4}"
+            task_part = f"_{start_task}" if start_task else ""
+            base_main, ext_main = os.path.splitext(log_main)
+            self._log_main_actual = (
+                f"{base_main}{task_part}_{self._batch_id}{ext_main}")
+            self._log_worker_dir_actual = log_worker
+        else:
+            self._batch_id = None
+            self._log_main_actual = log_main
+            self._log_worker_dir_actual = log_worker
+
+        # 3. 建目录
+        for d in (os.path.dirname(self._log_main_actual),
+                  self._log_worker_dir_actual):
+            if d:
+                try:
+                    os.makedirs(d, exist_ok=True)
+                except Exception:
+                    pass
+
+        # 4. 无任务名模式：main.log 加独占锁
+        if not self._manual_mode:
+            if not self._try_lock_log_main(self._log_main_actual):
+                raise RuntimeError(
+                    f"另一个调度器正在写同一个日志文件: {self._log_main_actual}\n"
+                    f"（若确认无其它实例，请删除锁文件: "
+                    f"{self._log_main_actual}.lock）")
+
+        log.info("主进程日志: %s", self._log_main_actual)
+        log.info("Worker 日志目录: %s", self._log_worker_dir_actual)
+
+    # >>> FIX LOG: 对 main.log 加独占锁（防重复启动）
+    def _try_lock_log_main(self, log_file: str) -> bool:
+        lock_path = log_file + ".lock"
+        try:
+            fd = open(lock_path, "w")
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fd.write(str(os.getpid()))
+            fd.flush()
+            self._log_lock_fd = fd
+            return True
+        except (OSError, IOError):
+            try:
+                fd.close()
+            except Exception:
+                pass
+            return False
+
+    # >>> FIX LOG: 释放日志锁
+    def _release_log_lock(self) -> None:
+        fd = self._log_lock_fd
+        if fd is None:
+            return
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            fd.close()
+        except Exception:
+            pass
+        self._log_lock_fd = None
+
+    # >>> FIX LOG: 计算某个 Worker 的日志文件路径
+    def _compute_worker_log_file(self, task_name: str) -> str:
+        dir_ = self._log_worker_dir_actual or "logs/worker"
+        if self._manual_mode and self._batch_id:
+            return os.path.join(dir_, f"{task_name}_{self._batch_id}.log")
+        return os.path.join(dir_, f"{task_name}.log")
 
     def _load_state(self) -> None:
         if not self._state_file or not os.path.exists(self._state_file):
@@ -972,6 +1138,11 @@ class Scheduler:
             return
 
         self._notify = {k: v for k, v in (cfg.get("notify") or {}).items() if v}
+
+        # >>> FIX LOG: 读取日志配置（首次生效，运行时修改不覆盖）
+        if self._log_main_actual is None:
+            self._log_main_cfg = str(cfg.get("log_main") or "").strip()
+            self._log_worker_cfg = str(cfg.get("log_worker") or "").strip()
 
         # instances（原样保留，下发给 worker）
         self._instances_wire = {
@@ -1147,11 +1318,23 @@ class Scheduler:
     # ------------------------------------------------------------------ #
     # Worker 管理
     # ------------------------------------------------------------------ #
+    # >>> FIX LOG: spawn 后立刻发 init 消息（含 log_file / main_pid）
     def _spawn_worker(self, task: Task) -> None:
         parent_conn, child_conn = Pipe()
         proc = Process(target=_worker_main, args=(child_conn,), daemon=True)
         proc.start()
         child_conn.close()  # 主进程不再需要 child 端
+
+        # >>> FIX LOG: 立即下发 init 消息（Worker 先初始化日志再执行任务）
+        try:
+            worker_log_file = self._compute_worker_log_file(task.name)
+            parent_conn.send({
+                "type": "init",
+                "log_file": worker_log_file,
+                "main_pid": os.getpid(),
+            })
+        except Exception:
+            log.exception("[%s] 下发 init 消息失败", task.name)
 
         self._workers[proc.pid] = {
             "process": proc,
@@ -1628,6 +1811,9 @@ class Scheduler:
         # except Exception:
         #     log.exception("退出时保存状态失败")
 
+        # >>> FIX LOG: 释放 main.log 独占锁
+        self._release_log_lock()
+
         if self._hook_pool is not None:
             try:
                 self._hook_pool.shutdown(wait=False)
@@ -1665,13 +1851,18 @@ def sch_main():
     start_task = sys.argv[2] if len(sys.argv) > 2 else None
 
     base = os.path.dirname(os.path.abspath(cfg_path))
-    setup_logging(log_file=os.path.join(base, "scheduler.log"))
+    # >>> FIX LOG: 主进程日志路径在 load_config 里计算，这里不再 setup_logging
+    # 先做一次"临时"日志（避免 load_config 里的错误无处打印）
+    setup_logging(log_file=os.path.join(base, "scheduler_boot.log"))
 
     sch = Scheduler()
     _GLOBAL_SCHEDULER = sch
 
     try:
-        sch.load_config(cfg_path)
+        # >>> FIX LOG: 传入 manual_mode（有无任务名）+ start_task
+        sch.load_config(cfg_path,
+                        manual_mode=bool(start_task),
+                        start_task=start_task)
     except Exception:
         log.exception("加载配置失败")
         sys.exit(1)
@@ -1681,6 +1872,10 @@ def sch_main():
         print(f"任务不存在: {start_task}")
         sys.exit(1)
 
+    # >>> FIX LOG: load_config 完成后，重新 setup_logging 到正式路径
+    #              （主进程的日志文件路径已确定）
+    setup_logging(log_file=sch._log_main_actual, is_worker=False)
+
     print()
     print("=" * 70)
     print(f"调度器已启动 | 配置: {cfg_path}")
@@ -1689,6 +1884,8 @@ def sch_main():
     else:
         print("入口任务: 无（按时间调度所有任务）")
     print(f"状态文件: {sch._state_file}")
+    print(f"主进程日志: {sch._log_main_actual}")
+    print(f"Worker 日志目录: {sch._log_worker_dir_actual}")
     print("-" * 70)
     print(HELP_TEXT)
     print("=" * 70)

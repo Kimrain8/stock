@@ -397,7 +397,7 @@ class Myqq():
         """codes :list类型, 是qqcode的格式: sz000408"""
         if codes is None:
             sql = f"""select distinct qh.qq_code from qq_hsj AS qh
-            where qh.trade_date  = CURDATE()
+            where qh.trade_date  = CURDATE()-1
             and not EXISTS (SELECT 1 FROM qq_qt AS qq where qh.qq_code = qq.qq_code and qh.trade_date = qq.trade_date )"""
             df2 = self.db.qry2df(sql=sql)
             df2 = df2.iloc[np.random.permutation(len(df2))].reset_index(drop=True)
@@ -421,6 +421,33 @@ class Myqq():
                 df['trade_date'] = self.trade_date
                 df['qq_code']=codes
                 self.db.bulkInsUpd(table=tbl,df=df)
+    def fetch_quotes_db_tmp(self,codes=None,tbl='qq_qt_detail_tmp'):
+            """codes :list类型, 是qqcode的格式: sz000408"""
+            if codes is None:
+                sql = ("select distinct qh.qq_code from qq_hsj AS qh "
+                        "where qh.trade_date  = (select max(b.trade_date) from qq_hsj as b)")
+                df2 = self.db.qry2df(sql=sql)
+                df2 = df2.iloc[np.random.permutation(len(df2))].reset_index(drop=True)
+                while len(df2)>=1:
+                    if len(df2) <= 100 : 
+                        codes = df2['qq_code'].to_list()
+                        df2 = pd.DataFrame(columns=df2.columns)
+                    else:
+                        codes = df2.loc[0:99,'qq_code'].to_list()
+                        df2 = df2.loc[100:,:].reset_index(drop=True)
+                    df = self.get_qq_quotes_df(codes=codes)
+                    if len(df) >= 1:
+                        df = df.replace(["",r"^\s*$"],None,regex=True)
+                        df['trade_date'] = self.trade_date
+                        df['qq_code']=codes
+                        self.db.bulkInsUpd(table=tbl,df=df)
+            else:
+                df = self.get_qq_quotes_df(codes=codes)
+                if len(df) >= 1:
+                    df = df.replace(["",r"^\s*$"],None,regex=True)
+                    df['trade_date'] = self.trade_date
+                    df['qq_code']=codes
+                    self.db.bulkInsUpd(table=tbl,df=df)
     def get_qq_gudong(self,df = None, qq_code = None,init=0):
         """
         获取腾讯财经流通股东数据, 返回结构化DataFrame, 同步模式

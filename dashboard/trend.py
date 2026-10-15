@@ -1,4 +1,7 @@
-"""趋势探索页面 — 三图联动（成交量/成交额/换手率 + 均价/持续天数）"""
+"""趋势探索页面 — 三图联动(成交量/成交额/换手率 + 均价/持续天数)
+批量计算：D:/pyprj/stock2/scripts/batch_prepare_trend.py
+"""
+import io
 import logging
 
 import numpy as np
@@ -7,14 +10,13 @@ import urllib.parse
 import panel as pn
 from bokeh.plotting import figure
 from bokeh.models import (
-    ColumnDataSource, Range1d, LinearAxis,HoverTool, PanTool, BoxSelectTool, BoxZoomTool,
-    WheelZoomTool, ResetTool,
+    ColumnDataSource, Range1d, LinearAxis, HoverTool, PanTool, BoxSelectTool,
+    BoxZoomTool, WheelZoomTool, ResetTool,
 )
-from bokeh.plotting import figure
 from bokeh.events import SelectionGeometry
-from .auth import sessions
-from .config import settings
-from .db_utils import load_user_symbols, load_kline, get_stock_name
+from dashboard.auth import sessions
+from dashboard.config import settings
+from dashboard.db_utils import load_user_symbols, load_kline, get_stock_name
 
 logger = logging.getLogger("stock2.trend")
 
@@ -42,15 +44,60 @@ def _get_current_user() -> tuple[str, str]:
 # ============================================================
 # 数据处理
 # ============================================================
+def _calc_persistence(values: np.ndarray):
+    """计算持续天数 + 起点索引。
+
+    返回：
+        low_days        低天数（int64 数组）
+        high_days       高天数（int64 数组）
+        low_start_idx   低天数对应窗口的起始索引
+        high_start_idx  高天数对应窗口的起始索引
+
+    low_days[i]=k 表示从 i-(k-1) 到 i 这 k 天里，values[i] 是最低。
+    所以窗口起始索引 = i-(k-1)。
+    """
+    n = len(values)
+    if n == 0:
+        empty = np.array([], dtype=np.int64)
+        return empty, empty, empty, empty
+
+    idx = np.arange(n)
+    lower = idx[:, None] > idx[None, :]
+
+    less_mask = (values[:, None] > values[None, :]) & lower
+    last_less = np.where(less_mask, idx[None, :], -1).max(axis=1)
+    low_days = (idx - last_less).astype(np.int64)
+
+    greater_mask = (values[:, None] < values[None, :]) & lower
+    last_greater = np.where(greater_mask, idx[None, :], -1).max(axis=1)
+    high_days = (idx - last_greater).astype(np.int64)
+
+    # 起点索引：last = -1 时表示"从序列首日算起"，否则从 last+1 开始
+    low_start_idx = np.where(last_less == -1, 0, last_less + 1)
+    high_start_idx = np.where(last_greater == -1, 0, last_greater + 1)
+
+    return low_days, high_days, low_start_idx, high_start_idx
+
+
 def add_trend_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """向量化添加 asc_cnt / desc_cnt / low_days / high_days。"""
+    """向量化添加 asc_cnt / desc_cnt / low_days / high_days / 起点日期。
+
+    同时为 close 和 avg_price 两套数列分别计算：
+        - low_days_close / high_days_close / low_start_date_close / high_start_date_close
+        - low_days_avg   / high_days_avg   / low_start_date_avg   / high_start_date_avg
+    """
     df = df.copy()
     close = df["close"].to_numpy(dtype=np.float64)
+    dates = df["date"].to_numpy()
     n = len(close)
 
     if n == 0:
-        for c in ("asc_cnt", "desc_cnt", "low_days", "high_days"):
-            df[c] = pd.Series(dtype=np.int64)
+        for c in ("asc_cnt", "desc_cnt",
+                  "low_days_close", "high_days_close",
+                  "low_start_date_close", "high_start_date_close",
+                  "low_days_avg", "high_days_avg",
+                  "low_start_date_avg", "high_start_date_avg"):
+            df[c] = pd.Series(dtype=object)
         return df
 
     # ---- asc_cnt / desc_cnt ----
@@ -71,19 +118,31 @@ def add_trend_columns(df: pd.DataFrame) -> pd.DataFrame:
     df["asc_cnt"] = _consecutive(is_up)
     df["desc_cnt"] = _consecutive(is_down)
 
-    # ---- low_days / high_days ----
-    idx = np.arange(n)
-    lower = idx[:, None] > idx[None, :]
+    # ---- 基于 close ----
+    low_c, high_c, low_start_c, high_start_c = _calc_persistence(close)
+    df["low_days_close"] = low_c
+    df["high_days_close"] = high_c
+    df["low_start_date_close"] = dates[low_start_c]
+    df["high_start_date_close"] = dates[high_start_c]
 
-    less_mask = (close[:, None] > close[None, :]) & lower
-    last_less = np.where(less_mask, idx[None, :], -1).max(axis=1)
-    df["low_days"] = (idx - last_less).astype(np.int64)
-
-    greater_mask = (close[:, None] < close[None, :]) & lower
-    last_greater = np.where(greater_mask, idx[None, :], -1).max(axis=1)
-    df["high_days"] = (idx - last_greater).astype(np.int64)
+    # ---- 基于 avg_price ----
+    if "avg_price" in df.columns:
+        avg = df["avg_price"].to_numpy(dtype=np.float64)
+        # 前几期可能有 NaN，用 ffill/bfill 补齐后再比较
+        avg_clean = pd.Series(avg).ffill().bfill().to_numpy(dtype=np.float64)
+        low_a, high_a, low_start_a, high_start_a = _calc_persistence(avg_clean)
+        df["low_days_avg"] = low_a
+        df["high_days_avg"] = high_a
+        df["low_start_date_avg"] = dates[low_start_a]
+        df["high_start_date_avg"] = dates[high_start_a]
+    else:
+        df["low_days_avg"] = 0
+        df["high_days_avg"] = 0
+        df["low_start_date_avg"] = pd.NaT
+        df["high_start_date_avg"] = pd.NaT
 
     return df
+
 
 def add_rolling_metrics(df: pd.DataFrame, window: int) -> pd.DataFrame:
     """计算滚动总和、VWAP、换手率、窗口起始日期。"""
@@ -109,8 +168,14 @@ def add_rolling_metrics(df: pd.DataFrame, window: int) -> pd.DataFrame:
 
     return d
 
+
 def _prepare_data(df: pd.DataFrame, window: int) -> pd.DataFrame:
-    """主流程：确保 date 列、加派生列、排序、类型转换。"""
+    """主流程：确保 date 列、加派生列、排序、类型转换。
+
+    ★ 顺序调整说明：
+        必须先用 add_rolling_metrics 算出 avg_price，
+        再用 add_trend_columns 计算基于 avg_price 的持续天数。
+    """
     d = df.copy()
     if "date" not in d.columns:
         if "trade_date" in d.columns:
@@ -127,9 +192,57 @@ def _prepare_data(df: pd.DataFrame, window: int) -> pd.DataFrame:
         if col in d.columns:
             d[col] = pd.to_numeric(d[col], errors="coerce").astype(np.float64)
 
-    d = add_trend_columns(d)
+    # ★ 先 rolling（算 avg_price），再 trend（算持续天数 + 起点日期）
     d = add_rolling_metrics(d, window)
+    d = add_trend_columns(d)
     return d
+
+
+# ============================================================
+# Excel 导出
+# ============================================================
+EXPORT_COLS = [
+    "date", "open", "high", "low", "close", "volume", "amount",
+    "float_share", "asc_cnt", "desc_cnt", "low_days", "high_days",
+    "sum_vol", "sum_amt", "date_min", "avg_price", "turnover_pct",
+]
+
+
+def _make_export_bytes(symbol: str, window: int, price_type: str) -> io.BytesIO:
+    """生成 xlsx 内容（BytesIO）。"""
+    if not symbol:
+        return io.BytesIO(b"")
+    try:
+        df = load_kline(symbol)
+        if df.empty:
+            return io.BytesIO(b"")
+        d = _prepare_data(df, window)
+    except Exception as e:
+        logger.exception("export prepare failed | %s", symbol)
+        return io.BytesIO(b"")
+
+    # 根据 price_type 统一成 low_days / high_days 两列
+    if price_type == "close":
+        d["low_days"] = d["low_days_close"]
+        d["high_days"] = d["high_days_close"]
+    else:
+        d["low_days"] = d["low_days_avg"]
+        d["high_days"] = d["high_days_avg"]
+
+    cols = [c for c in EXPORT_COLS if c in d.columns]
+    out = d[cols].copy()
+
+    # 日期列转字符串，Excel 里好看
+    for c in ("date", "date_min"):
+        if c in out.columns:
+            out[c] = pd.to_datetime(out[c]).dt.strftime("%Y-%m-%d")
+
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as w:
+        out.to_excel(w, index=False, sheet_name="trend")
+    bio.seek(0)
+    return bio
+
 
 # ============================================================
 # 工具
@@ -156,6 +269,7 @@ def _norm(arr: np.ndarray, q: float = 99.0) -> float:
         return 1.0
     v = float(np.percentile(finite, q))
     return v if v > 0 else 1.0
+
 
 def _read_url_params() -> dict:
     """从多个来源读取 URL 参数，返回 dict，值统一为 str。"""
@@ -200,6 +314,7 @@ def _read_url_params() -> dict:
         return str(v) if v is not None else ""
 
     return {_to_str(k): _to_str(v) for k, v in raw.items()}
+
 
 # ============================================================
 # 图 1：三根柱子，底部对齐 avg_price
@@ -322,24 +437,20 @@ def _build_fig1(d: pd.DataFrame, gap: float, x_range: Range1d, code_label: str =
 # ============================================================
 # 图 2：三根柱子，从 0 开始，双轴
 # ============================================================
-from bokeh.models import (
-    PanTool, BoxSelectTool, BoxZoomTool, WheelZoomTool, ResetTool,
-)
-
-
-def _build_fig2(d: pd.DataFrame, gap: float, x_range: Range1d,on_range_select=None, code_label: str = ""):
+def _build_fig2(d: pd.DataFrame, gap: float, x_range: Range1d,
+                on_range_select=None, code_label: str = ""):
     """三根柱子从 0 开始。
+
     归一化策略：
         成交量、成交额 → 各自独立归一到 [0, 1]（左轴）
         换手率         → 保留原始百分比（右轴）
     这样每根柱子的高度都反映了"该指标在其自身序列中的相对位置"，
     且图 1、图 2 视觉一致。
-    """
-    from bokeh.models import (
-        PanTool, BoxSelectTool, BoxZoomTool, WheelZoomTool, ResetTool,
-        LinearAxis,
-    )
 
+    ★ hover 改动：三个柱子共用同一个 CDS，
+                 一个 HoverTool 绑三个 renderer，
+                 显示信息一致（当前日期、起始日期、成交量、成交额、换手率）。
+    """
     pan_tool = PanTool(dimensions="width")
     box_sel_tool = BoxSelectTool(dimensions="width")
     box_zoom_tool = BoxZoomTool(dimensions="width")
@@ -381,10 +492,9 @@ def _build_fig2(d: pd.DataFrame, gap: float, x_range: Range1d,on_range_select=No
 
     # ---------- 数据准备 ----------
     xs_vol, xs_amt, xs_to = [], [], []
-    v_norm, a_norm = [], []              # 归一化值（左轴）
-    t_raw = []                            # 换手率原始值（右轴）
+    v_norm, a_norm, t_raw = [], [], []
     dates, date_mins = [], []
-    v_raw_list, a_raw_list = [], []      # hover 用
+    v_raw_list, a_raw_list = [], []
 
     for _, row in d.iterrows():
         date_i = row["date"]
@@ -407,64 +517,45 @@ def _build_fig2(d: pd.DataFrame, gap: float, x_range: Range1d,on_range_select=No
         dates.append(date_i)
         date_mins.append(row["date_min"])
 
-    src_vol = ColumnDataSource(dict(
-        x=xs_vol, y=v_norm, y_raw=v_raw_list, date=dates, date_min=date_mins,
-    ))
-    src_amt = ColumnDataSource(dict(
-        x=xs_amt, y=a_norm, y_raw=a_raw_list, date=dates, date_min=date_mins,
-    ))
-    src_to = ColumnDataSource(dict(
-        x=xs_to, y=t_raw, date=dates, date_min=date_mins,
+    # ★ 三个柱子共用一个 CDS
+    src = ColumnDataSource(dict(
+        x_vol=xs_vol, y_vol=v_norm,
+        x_amt=xs_amt, y_amt=a_norm,
+        x_to=xs_to, y_to=t_raw,
+        date=dates, date_min=date_mins,
+        sum_vol=v_raw_list, sum_amt=a_raw_list, turnover=t_raw,
     ))
 
     # ---------- 柱 ----------
     r_vol = fig.vbar(
-        x="x", top="y", bottom=0, width=bar_w_ms,
-        source=src_vol, color="#1e88e5", alpha=0.75,
+        x="x_vol", top="y_vol", bottom=0, width=bar_w_ms,
+        source=src, color="#1e88e5", alpha=0.75,
         legend_label="成交量（相对强度）",
     )
     r_amt = fig.vbar(
-        x="x", top="y", bottom=0, width=bar_w_ms,
-        source=src_amt, color="#43a047", alpha=0.75,
+        x="x_amt", top="y_amt", bottom=0, width=bar_w_ms,
+        source=src, color="#43a047", alpha=0.75,
         legend_label="成交额（相对强度）",
     )
     r_to = fig.vbar(
-        x="x", top="y", bottom=0, width=bar_w_ms,
-        source=src_to, color="#fb8c00", alpha=0.75,
+        x="x_to", top="y_to", bottom=0, width=bar_w_ms,
+        source=src, color="#fb8c00", alpha=0.75,
         y_range_name="pct",
         legend_label="换手率（%）",
     )
 
-    # ---------- Hover ----------
-    fig.add_tools(
-        HoverTool(
-            renderers=[r_vol],
-            tooltips=[
-                ("当前日期", "@date{%F}"),
-                ("起始日期", "@date_min{%F}"),
-                ("成交量",   "@y_raw{0,0} 手"),
-            ],
-            formatters={"@date": "datetime", "@date_min": "datetime"},
-        ),
-        HoverTool(
-            renderers=[r_amt],
-            tooltips=[
-                ("当前日期", "@date{%F}"),
-                ("起始日期", "@date_min{%F}"),
-                ("成交额",   "@y_raw{0,0} 千元"),
-            ],
-            formatters={"@date": "datetime", "@date_min": "datetime"},
-        ),
-        HoverTool(
-            renderers=[r_to],
-            tooltips=[
-                ("当前日期", "@date{%F}"),
-                ("起始日期", "@date_min{%F}"),
-                ("换手率",   "@y{0.00} %"),
-            ],
-            formatters={"@date": "datetime", "@date_min": "datetime"},
-        ),
-    )
+    # ---------- 统一 Hover：三个柱子显示一致的信息 ----------
+    fig.add_tools(HoverTool(
+        renderers=[r_vol, r_amt, r_to],
+        tooltips=[
+            ("当前日期", "@date{%F}"),
+            ("起始日期", "@date_min{%F}"),
+            ("成交量",   "@sum_vol{0,0} 手"),
+            ("成交额",   "@sum_amt{0,0} 千元"),
+            ("换手率",   "@turnover{0.00} %"),
+        ],
+        formatters={"@date": "datetime", "@date_min": "datetime"},
+    ))
 
     # ---------- 隐藏 picker 层（框选用） ----------
     src_picker = ColumnDataSource(dict(
@@ -514,22 +605,46 @@ def _build_fig2(d: pd.DataFrame, gap: float, x_range: Range1d,on_range_select=No
 
 
 # ============================================================
-# 图 3：均价折线 + 最高/最低持续天数柱
+# 图 3：价格折线 + 最高/最低持续天数柱
 # ============================================================
-def _build_fig3(d: pd.DataFrame, gap: float, x_range: Range1d,code_label: str = ""):
+def _build_fig3(d: pd.DataFrame, gap: float, x_range: Range1d,
+                price_type: str = "avg", code_label: str = ""):
+    """价格折线 + 持续天数柱。
+
+    参数：
+        price_type: "avg"   → 折线显示 avg_price，柱显示 low/high_days_avg
+                    "close" → 折线显示 close，柱显示 low/high_days_close
+        code_label: 图表标题前缀（代码 + 名称）
+    """
+    if price_type == "close":
+        price_col = "close"
+        low_col = "low_days_close"
+        high_col = "high_days_close"
+        low_start_col = "low_start_date_close"
+        high_start_col = "high_start_date_close"
+        price_label = "收盘价"
+    else:
+        price_col = "avg_price"
+        low_col = "low_days_avg"
+        high_col = "high_days_avg"
+        low_start_col = "low_start_date_avg"
+        high_start_col = "high_start_date_avg"
+        price_label = "平均价"
+
     fig = figure(
         x_range=x_range, height=380,
-        title=f"{code_label} ③ 平均价（折线）+ 最高/最低持续天数（柱子）".strip(),
+        title=f"{code_label} ③ {price_label}（折线）+ 最高/最低持续天数（柱子）".strip(),
         x_axis_type="datetime",
         tools="pan,box_zoom,reset,xwheel_zoom",
         toolbar_location="above",
     )
     fig.xaxis.axis_label = "日期"
-    fig.yaxis.axis_label = "平均价（元）"
+    fig.yaxis.axis_label = f"{price_label}（元）"
 
     # ---- 左轴：紧贴价格范围 ----
-    price_min = float(d["avg_price"].min())
-    price_max = float(d["avg_price"].max())
+    p_series = d[price_col]
+    price_min = float(p_series.min())
+    price_max = float(p_series.max())
     span = price_max - price_min
     if not np.isfinite(span) or span <= 0:
         span = max(abs(price_max) * 0.01, 0.01)
@@ -537,8 +652,8 @@ def _build_fig3(d: pd.DataFrame, gap: float, x_range: Range1d,code_label: str = 
     fig.y_range = Range1d(start=price_min - pad, end=price_max + pad)
 
     # ---- 右轴：持续天数 ----
-    hd_max = float(d["high_days"].max()) if len(d) else 10
-    ld_max = float(d["low_days"].max()) if len(d) else 10
+    hd_max = float(d[high_col].max()) if len(d) else 10
+    ld_max = float(d[low_col].max()) if len(d) else 10
     days_max = max(hd_max, ld_max, 10) * 1.1
     fig.extra_y_ranges["days"] = Range1d(start=0, end=days_max)
     fig.add_layout(
@@ -555,38 +670,49 @@ def _build_fig3(d: pd.DataFrame, gap: float, x_range: Range1d,code_label: str = 
     src = ColumnDataSource(dict(
         # 折线用
         x_line=d["date"].tolist(),
-        y_line=d["avg_price"].tolist(),
+        y_line=d[price_col].tolist(),
         # 高柱用
         x_h=xs_h,
-        y_h=d["high_days"].tolist(),
+        y_h=d[high_col].tolist(),
         # 低柱用
         x_l=xs_l,
-        y_l=d["low_days"].tolist(),
-        # hover 公共字段
+        y_l=d[low_col].tolist(),
+        # hover 公共字段（两个价格都带）
         date=d["date"].tolist(),
         avg_price=d["avg_price"].tolist(),
-        high_days=d["high_days"].tolist(),
-        low_days=d["low_days"].tolist(),
+        close=d["close"].tolist(),
+        high_days=d[high_col].tolist(),
+        low_days=d[low_col].tolist(),
+        # ★ 起点日期：转成字符串，避免 Bokeh 序列化成时间戳
+        low_start_date=pd.to_datetime(d[low_start_col]).dt.strftime(
+            "%Y-%m-%d"
+        ).tolist(),
+        high_start_date=pd.to_datetime(d[high_start_col]).dt.strftime(
+            "%Y-%m-%d"
+        ).tolist(),
     ))
 
     line_r = fig.line(x="x_line", y="y_line", source=src,
                       color="#1e88e5", line_width=2,
-                      legend_label="平均价")
+                      legend_label=price_label)
     r_h = fig.vbar(x="x_h", top="y_h", bottom=0, width=bar_w_ms,
                    source=src, color="#e53935", alpha=0.5,
-                   y_range_name="days", legend_label="多少天来最高")
+                   y_range_name="days",
+                   legend_label=f"{price_label}多少天来最高")
     r_l = fig.vbar(x="x_l", top="y_l", bottom=0, width=bar_w_ms,
                    source=src, color="#43a047", alpha=0.5,
-                   y_range_name="days", legend_label="多少天来最低")
+                   y_range_name="days",
+                   legend_label=f"{price_label}多少天来最低")
 
-    # ---- 关键：一个 HoverTool 绑三个 renderer，显示全部信息 ----
+    # ---- HoverTool：起点日期直接用字符串显示 ----
     fig.add_tools(HoverTool(
         renderers=[line_r, r_h, r_l],
         tooltips=[
             ("日期",         "@date{%F}"),
             ("均价",         "@avg_price{0.000} 元"),
-            ("多少天来最高", "@high_days 天"),
-            ("多少天来最低", "@low_days 天"),
+            ("收盘价",       "@close{0.000} 元"),
+            ("多少天来最高", "@{high_days} 天(自 @{high_start_date})"),
+            ("多少天来最低", "@{low_days} 天(自 @{low_start_date})"),
         ],
         formatters={"@date": "datetime"},
     ))
@@ -602,7 +728,8 @@ def _build_fig3(d: pd.DataFrame, gap: float, x_range: Range1d,code_label: str = 
 # ============================================================
 # 组合：三图共享 x_range
 # ============================================================
-def build_charts(df: pd.DataFrame, window: int, on_range_select=None, code_label: str = ""):
+def build_charts(df: pd.DataFrame, window: int, on_range_select=None,
+                 code_label: str = "", price_type: str = "avg"):
     d = _prepare_data(df, window)
     if d.empty:
         return None, None, None
@@ -612,9 +739,11 @@ def build_charts(df: pd.DataFrame, window: int, on_range_select=None, code_label
     x_min = max(d["date"].min(), x_max - pd.Timedelta(days=90))
     x_range = Range1d(start=x_min, end=x_max)
 
-    fig1 = _build_fig1(d, gap, x_range,code_label=code_label)
-    fig2 = _build_fig2(d, gap, x_range, on_range_select=on_range_select,code_label=code_label)
-    fig3 = _build_fig3(d, gap, x_range,code_label=code_label)
+    fig1 = _build_fig1(d, gap, x_range, code_label=code_label)
+    fig2 = _build_fig2(d, gap, x_range, on_range_select=on_range_select,
+                       code_label=code_label)
+    fig3 = _build_fig3(d, gap, x_range, price_type=price_type,
+                       code_label=code_label)
     return fig1, fig2, fig3
 
 
@@ -669,7 +798,29 @@ def build_trend():
             name="向前汇总多少天",
             value=0, start=0, end=60, width=160,
         )
-        status = pn.pane.Markdown("**请从下拉选择股票代码**", width=320)
+        status = pn.pane.Markdown("**请从下拉选择股票代码**", width=260)
+
+        # ★ 图 3 专用：价格类型互斥单选框（只影响第三幅图）
+        price_type_select = pn.widgets.RadioButtonGroup(
+            name="",
+            options={"平均价": "avg", "收盘价": "close"},
+            value="avg",
+            button_type="default",
+            width=180,
+        )
+
+        # ★ 导出按钮：把整个后台 df 导成 xlsx
+        export_btn = pn.widgets.FileDownload(
+            callback=lambda: _make_export_bytes(
+                symbol_select.value,
+                window_input.value,
+                price_type_select.value,
+            ),
+            filename="trend_export.xlsx",
+            label="📥 导出 XLSX",
+            button_type="default",
+            width=130,
+        )
 
         fig1_pane = pn.pane.Bokeh(sizing_mode="stretch_width")
         fig2_pane = pn.pane.Bokeh(sizing_mode="stretch_width")
@@ -687,7 +838,7 @@ def build_trend():
         filter_input.param.watch(on_filter, "value")
 
         # ---------- 更新逻辑 ----------
-        def update(symbol, window):
+        def update(symbol, window, price_type):
             if not symbol:
                 status.object = "**请从下拉选择股票代码**"
                 fig1_pane.object = None
@@ -712,10 +863,13 @@ def build_trend():
                     fig3_pane.object = None
                     return
                 name = get_stock_name(symbol)
-                code_label = f"{symbol} {name}".strip()   # 例如 "600519.SH 贵州茅台"
+                code_label = f"{symbol} {name}".strip()
 
                 fig1, fig2, fig3 = build_charts(
-                    df, window, on_range_select=on_range_select,code_label=code_label,
+                    df, window,
+                    on_range_select=on_range_select,
+                    code_label=code_label,
+                    price_type=price_type,
                 )
                 if fig1 is None:
                     status.object = "**数据不足**"
@@ -725,14 +879,15 @@ def build_trend():
                 fig2_pane.object = fig2
                 fig3_pane.object = fig3
                 status.object = f"**{symbol}** · 共 {len(df)} 条记录"
-                logger.info("trend update | symbol=%s | window=%s | rows=%d",
-                            symbol, window, len(df))
+                logger.info("trend update | symbol=%s | window=%s | price=%s | rows=%d",
+                            symbol, window, price_type, len(df))
             except Exception as e:
                 logger.exception("trend update failed")
                 status.object = f"**错误：{e}**"
 
         # ---------- 绑定 ----------
-        pn.bind(update, symbol_select, window_input, watch=True)
+        pn.bind(update, symbol_select, window_input, price_type_select,
+                watch=True)
 
         # ---------- 应用 URL 参数（必须在控件定义 + pn.bind 之后） ----------
         if initial_symbol:
@@ -751,20 +906,41 @@ def build_trend():
                 symbol_select.value = resolved
                 logger.info("trend url applied | symbol=%s", resolved)
                 # 关键：手动触发一次 update，确保图表立即加载
-                update(resolved, window_input.value)
+                update(resolved, window_input.value, price_type_select.value)
             else:
                 logger.warning("trend url symbol not found | %s", initial_symbol)
                 status.object = f"**URL 指定的 {initial_symbol} 不在可选列表**"
 
         # ---------- 布局 ----------
+        # 说明：price_type_select 只控制图 3，因此放在图 3 上方、紧贴图 3，
+        #       不放到顶部工具栏。
         return pn.Column(
-            pn.Row(filter_input, symbol_select, window_input, status,
-                   sizing_mode="stretch_width"),
+            pn.Row(
+                filter_input,
+                symbol_select,
+                window_input,
+                export_btn,
+                status,
+                sizing_mode="stretch_width",
+            ),
             fig1_pane,
             fig2_pane,
+            # ↓↓↓ 图 3 的专用切换栏（单行，紧贴图 3，不占图像高度）
+            pn.Row(
+                pn.pane.Markdown("**③ 折线/柱子的价格类型：**", width=180),
+                price_type_select,
+                sizing_mode="stretch_width",
+            ),
             fig3_pane,
             sizing_mode="stretch_width",
             styles={"padding": "12px"},
         )
 
     return _factory
+
+
+if __name__ == "__main__":
+    symbol = '300748.SZ'
+    df = load_kline(symbol)
+    df2 = _prepare_data(df=df, window=20)
+    df2.to_pickle('300748.pkl')
