@@ -1,13 +1,14 @@
 import json
+import random
 import subprocess
 import os
-import sys
 import pandas as pd
 from datetime import datetime,date,timedelta
 import numpy as np
 import re
 import hashlib, time
 import requests
+from requests.exceptions import RequestException, ProxyError, Timeout
 
 import akshare as ak
 import tushare as ts
@@ -24,6 +25,7 @@ from urllib.parse import quote, urlencode, urlparse, parse_qs
 
 from IPython import embed
 from utils.dbManager import MySQLHelper
+from mstats_sign import MStatsSigner
 
 # region 打开chrome浏览器, 而且启用远程调试模式
 def open_chrome_with_remote_debugging():
@@ -569,174 +571,151 @@ class Myqq():
     def __init__(self):
         self.db = MySQLHelper(db='jhd')
         self.trade_date = pd.Timestamp.now().date()
-    @staticmethod
-    def get_qq_sign(plate_code, exchange=12, sort_type=1, source='zxg', stocks_type=3, user_type=4, t=int(time.time() * 1000)):
+        self.BASE_URL = "https://webapi.cninfo.com.cn"
+    def get_qq_sign(self,params, t=int(time.time() * 1000)):
         """获取行业对应的股票明细api,生成需要的动态sign值, plate_code只含数字
         引用：
         t = int(time.time() * 1000)  # 毫秒时间戳
-        sign = gen_sign("12", "01801733", "1", "zxg", "3", "4", t)"""
+        sign = gen_sign("12", "01801733", "1", "zxg", "3", "4", t)
+        """
         params = {
-            "exchange": exchange,
-            "plate_code": plate_code,
-            "sort_type": sort_type,
-            "source": source,
-            "stocks_type": stocks_type,
+            "exchange": params["exchange"],
+            "plate_code": params["plate_code"],
+            "sort_type": params["sort_type"],
+            "source": params["source"],
+            "stocks_type": params["stocks_type"],
             "time": t,
-            "user_type": user_type,
+            "user_type": params["user_type"],
         }
         s = "&".join(f"{k}={v}" for k, v in params.items())
         s += "&key=7ad247390dafce0cf9911de0f2083eba"
-        return hashlib.md5(s.encode()).hexdigest()
-    async def get_qq_getBoardRankList(self,page, board_code = "aStock",offset: int = 0, count: int = 20):
-        """获取腾讯 hsj股票数据,使用page环境的request,直接调用api接口"""
-        base_url = "https://proxy.finance.qq.com/cgi/cgi-bin/rank/hs/getBoardRankList"
-        params = {
-            "_appver": "11.17.0",
-            "board_code": board_code,
-            "sort_type": "price",
-            "direct": "down",
-            "offset": offset,
-            "count": count,
-            "_t": int(asyncio.get_event_loop().time() * 1000)
-        }
-        url = f"{base_url}?{urlencode(params)}"
-        headers = {
-            "Referer": "https://stockapp.finance.qq.com", #page.evaluate("()=>document.referrer")
-            "Origin": "https://stockapp.finance.qq.com", #page.evaluate("() => window.origin")
-            "User-Agent": await page.evaluate("()=>navigator.userAgent")
-        }
-        resp = await page.request.get(url, headers=headers)
-        if resp.ok:
-            return await resp.json()
-        return {}
-    async def fetch_getBoardRankList_df(self,board_code = "aStock"):
-        """获取腾讯hsj股票数据,对应get_qq_getBoardRankList,先分批获取全部数据,整合到一个df中,
-        board_code: aStock, cyb,ksh"""
-        async with async_playwright() as p:
-            # browser = await p.chromium.connect_over_cdp("http://localhost:9222")
-            # context = browser.contexts[0]
-            # page = None
-            context = await p.chromium.launch_persistent_context(
-                user_data_dir="./chrome_user_data",headless=True)
-            page = await context.new_page()
-            
-            if board_code == "aStock":
-                web_url = "https://stockapp.finance.qq.com/mstats/#mod=list&id=hs_hsj&module=hs&type=hsj"
-            elif board_code == "cyb":
-                web_url = "https://stockapp.finance.qq.com/mstats/#mod=list&id=hs_cyb&module=hs&type=cyb"
-            elif board_code == "ksh":
-                web_url = "https://stockapp.finance.qq.com/mstats/#mod=list&id=hs_kcb&module=hs&type=kcb"
-            # for i in context.pages:
-            #     # i.url.split("#")[0]   # 去掉参数部分
-            #     if i.url == web_url:
-            #         page = i
-            #         break
-            # if page is None:
-            #     # raise RuntimeError("未找到目标页面，请确保已打开 https://stockapp.finance.qq.com/mstats/")
-            #     print("未找到目标页面，请确保已打开 https://stockapp.finance.qq.com/mstats/")
-            #     page = await browser.new_page()
-            #     await page.goto(web_url)
-            #     await page.wait_for_selector("div#page-navi>a#p-1", state="visible", timeout=10000)
-            await page.goto(web_url)
-            await page.wait_for_selector("div#page-navi>a#p-1", state="visible", timeout=10000)
-            
-            # 主动调用接口，offset=40 count=20，对应你的curl示例
-            api_data = await self.get_qq_getBoardRankList(page, board_code=board_code,offset=0, count=100)
-            rank_list = api_data.get("data", {}).get("rank_list", [])
-            df = pd.DataFrame(rank_list)
-            cnt = api_data.get('data').get('total')
-            cnt = cnt // 100 + (1 if cnt % 100 > 0 else 0)  # 计算总页数，每页100条
-            for i in range(1, cnt):
-                api_data = await self.get_qq_getBoardRankList(page, board_code=board_code, offset=i*100, count=100)
-                rank_list = api_data.get("data", {}).get("rank_list", [])
-                df2 = pd.DataFrame(rank_list)
-                df = pd.concat([df, df2], ignore_index=True)
-            return df
-    async def fetch_getBoardRankList_db(self):
-        """获取沪深京个股数据"""
-        df = await self.fetch_getBoardRankList_df(board_code="aStock") #获取腾讯 BoardRankList,hsj个股数据
-        df.rename(columns={"code": "qq_code","zdf":"pct_chg","zd":"change_amount",
-                            "volume":"vol","turnover":"amount","stock_type":"market"}, inplace=True)
-        df["symbol"] = df['qq_code'].str.extract(r'(\d+)')
-        df["trade_date"] = self.trade_date
-        self.db.bulkInsUpd(df,table="qq_hsj")
-        # df = await self.fetch_getBoardRankList_df(board_code="cyb") #获取腾讯 BoardRankList,创业板个股数据
-        # df.rename(columns={"code": "qq_code","zdf":"pct_chg","zd":"change_amount",
-        #                     "volume":"vol","turnover":"amount","stock_type":"market"}, inplace=True)
-        # df["symbol"] = df['qq_code'].str.extract(r'(\d+)')
-        # df["trade_date"] = self.trade_date
-        # self.db.bulkInsUpd(df,table="qq_hsj")
-        # df = await self.fetch_getBoardRankList_df(board_code="ksh") #获取腾讯 BoardRankList,科创板个股数据
-        # df.rename(columns={"code": "qq_code","zdf":"pct_chg","zd":"change_amount",
-        #                     "volume":"vol","turnover":"amount","stock_type":"market"}, inplace=True)
-        # df["symbol"] = df['qq_code'].str.extract(r'(\d+)')
-        # df["trade_date"] = self.trade_date
-        # self.db.bulkInsUpd(df,table="qq_hsj")
-    
-    async def get_qq_getRank(self,page,board_type="hy2", offset: int = 0, count: int = 20):
-        """获取腾讯 申万二级行业数据"""
-        # https://proxy.finance.qq.com/cgi/cgi-bin/rank/pt/getRank?board_type=hy2&sort_type=price&direct=down&offset=0&count=20
-        base_url = "https://proxy.finance.qq.com/cgi/cgi-bin/rank/pt/getRank"
-        params = {
-            "_appver": "11.17.0",
-            "board_type": board_type,
-            "sort_type": "price",
-            "direct": "down",
-            "offset": offset,
-            "count": count,
-            "_t": int(asyncio.get_event_loop().time() * 1000)
-        }
-        url = f"{base_url}?{urlencode(params)}"
-        headers = {
-            "Referer": "https://stockapp.finance.qq.com", #page.evaluate("()=>document.referrer")
-            "Origin": "https://stockapp.finance.qq.com", #page.evaluate("() => window.origin")
-            "User-Agent": await page.evaluate("()=>navigator.userAgent")
-        }
-        resp = await page.request.get(url, headers=headers)
-        if resp.ok:
-            return await resp.json()
-        return {}
-    async def fetch_getRank_df(self,board_type="hy2"):
-        """获取腾讯行业数据,对应get_qq_getRank,先分批获取全部数据,整合到一个df中"""
-        async with async_playwright() as p:
-            # browser = await p.chromium.connect_over_cdp("http://localhost:9222")
-            # context = browser.contexts[0]
-            # page = None
-            # for i in context.pages:
-            #     # i.url.split("#")[0]   # 去掉参数部分
-            #     if i.url == "https://stockapp.finance.qq.com/mstats/#mod=list&id=hy_second&module=hy&type=second":
-            #         page = i
-            #         break
-            context = await p.chromium.launch_persistent_context(
-                user_data_dir="./chrome_user_data",headless=True
-            )
-            page = await context.new_page()
-            await page.goto("https://stockapp.finance.qq.com/mstats/#mod=list&id=hy_second&module=hy&type=second")
-            await page.wait_for_selector("div#page-navi>a#p-1", state="visible", timeout=10000)
+        token = hashlib.md5(s.encode()).hexdigest()
+        return token
+    def _request(self,data_url: str, params: dict, rhead: dict,rtype:str = 'json',  
+                    method: str = "GET",timeout: int = 30, proxy_pool: list = None,
+                    max_retries: int = 3, retry_sleep: tuple = (2, 6)):
+        """按 method("GET"/"POST")请求一个 sysapi 并返回 records 列表；失败返回 -1。"""
+        method = method.upper()
+        if method not in ("GET", "POST"):
+            raise ValueError(f"method 只支持 'GET' / 'POST'，收到 {method!r}")
+        if proxy_pool is None:
+            proxy_pool = getattr(self, "proxy_pool", None)
+        if proxy_pool is None:
+            alive = None
+            single_proxy = None
+            bad_proxy = None
+        else:
+            single_proxy = len(proxy_pool) == 1
+            bad_proxy = getattr(self, "_BAD_PROXY", {})
+            self._BAD_PROXY = bad_proxy
+            alive = [p for p in proxy_pool if bad_proxy.get(p, 0) < 3] or proxy_pool
+        
+        def _do_request():
+            last_exc = None
+            for attempt in range(max_retries):
+                proxy = random.choice(alive) if alive else None
+                proxies = {"http": proxy, "https": proxy} if proxy else None
+                try:
+                    with requests.Session() as session:
+                        session.headers.update(rhead)
+                        resp = session.request(method, data_url, params=params,
+                                                timeout=timeout, proxies=proxies)
+                        resp.raise_for_status()
+                        if rtype == 'json':
+                            return resp.json()
+                        elif rtype == 'str':
+                            return resp
+                except (ProxyError, Timeout) as e:
+                    if not single_proxy and proxy:
+                        bad_proxy[proxy] = bad_proxy.get(proxy, 0) + 1
+                        alive[:] = [p for p in alive if bad_proxy.get(p, 0) < 3] or proxy_pool
+                    last_exc = e
+                except RequestException as e:
+                    last_exc = e
+                if attempt < max_retries - 1:
+                    wait = random.uniform(*retry_sleep)
+                    print(f"[重试 {attempt + 1}/{max_retries}] 等待 {wait:.2f}s …")
+                    time.sleep(wait)
+            raise last_exc if last_exc else RuntimeError("request failed")
 
-            # 主动调用接口，offset=40 count=20，对应你的curl示例
-            api_data = await self.get_qq_getRank(page,board_type=board_type, offset=0, count=100)
-            rank_list = api_data.get("data", {}).get("rank_list", [])
-            df = pd.DataFrame(rank_list)
-            cnt = api_data.get('data').get('total')
-            cnt = cnt // 100 + (1 if cnt % 100 > 0 else 0)  # 计算总页数，每页100条
-            for i in range(1, cnt):
-                api_data = await self.get_qq_getRank(page,board_type=board_type, offset=i*100, count=100)
-                rank_list = api_data.get("data", {}).get("rank_list", [])
-                df2 = pd.DataFrame(rank_list)
-                df = pd.concat([df, df2], ignore_index=True)
-            return df
-    async def fetch_getRank_db(self):
-        """获取行业（板块）的整体变化"""
-        df = await self.fetch_getRank_df(board_type="hy2") #获取行业数据
-        df.rename(columns={"code": "code_qqhy","name":"name_hy","stock_type":"type_hy","turnover":"amount","volume":"vol","zd":"change_amount",
-                        "zdf":"pct_chg"}, inplace=True)
-        df["trade_date"] = self.trade_date #- pd.Timedelta(days=1)
-        df["symbol_hy"] = df['code_qqhy'].str.extract(r'(\d+)')
-        df['lzg'] = df["lzg"].apply(lambda x: json.dumps(x, ensure_ascii=False))
-        self.db.bulkInsUpd(df,table="qq_hy_hsj")
-    async def fetch_xg_plate_stocks_df(self,plate_code_ori, plate_name,browser ):
+        data = _do_request()
+        # 令牌失效重试（换 key，同样走代理）
+        if isinstance(data, dict) and data.get("resultcode") in (401, 451):
+            time.sleep(random.uniform(*retry_sleep))
+            data = _do_request()
+        return data
+    def fetch_plate_stocks_df(self,plate_code_ori ):
+        """获取行业（板块）下的个股详情。直接获取sign，然后获取api数据 """
+        base_url_path = "https://bisheng.tenpay.com/fcgi-bin/xg_plate_stocks.fcgi"
+        plate_code = next(iter(re.findall(r"\d+", plate_code_ori)), None)
+        params = {
+                    "exchange": 12, #"mod": "list", 
+                    "plate_code": plate_code, #"id": plate_code_ori,
+                    "sort_type": 1, #"typename": plate_name,
+                    "source": "zxg", #"sign": 'web'
+                    "stocks_type": 3,
+                    "time": "",
+                    "user_type": 4,
+                }
+        _t = int(time.time() * 1000)
+        token = self.get_qq_sign(params=params,t=_t)
+        params.update({"sign": token,"time":_t})
+        rhead = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Referer": "https://stockapp.finance.qq.com/",
+            }
+        api_data = self._request(data_url=base_url_path,params=params,rhead=rhead)
+        if api_data is None or api_data.get('stocks') is None:
+            api_data = {}
+        rank_list = api_data.get("stocks", {}).get("stocks_list", [])
+        df = pd.DataFrame(rank_list)
+        return df
+    def fetch_plate_stocks_db(self,df=None,plate_code_ori=None, plate_name=None,waitsecond=None):
         """获取行业（板块）下的个股详情"""
+        def process_df(df,pcode,pname):
+            df.rename(columns={"stock_code": "ts_code","stock_name":"name","price":"zxj","change_percent":"pct_chg",
+                                "price_change":"change_amount","market_cap":"zsz",
+                                "liutong_cap":"ltsz","main_net_inflow":"zljlr","turnover_amount":"vol",
+                                "turnover_money":"amount","turnover_ratio":"hsl",
+                                "amplitude":"zf","quantity_ratio":"lb","stock_type":"market"}, inplace=True)
+            df["trade_date"] = self.trade_date #- pd.Timedelta(days=1)
+            df["symbol"] = df['ts_code'].str.extract(r'(\d+)')
+            df['tags'] = df["tags"].apply(lambda x: json.dumps(x, ensure_ascii=False))
+            df['code_qqhy'] = pcode
+            df['symbol_hy'] = df['code_qqhy'].str.extract(r'(\d+)')
+            df['name_hy'] = pname
+            return df
+        def fetch_plate_stocks_db_sub(df=None,plate_code_ori=None, plate_name=None,waitsecond=None):
+            if df is None and plate_code_ori is not None and plate_name is not None:
+                df_rst = self.fetch_plate_stocks_df(plate_code_ori)
+                df_rst = process_df(df_rst,plate_code_ori,plate_name)
+                self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail')
+                self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail_daily')
+            elif df is not None:
+                for i in range(len(df)):
+                    code = df.loc[i, 'code_qqhy']
+                    name = df.loc[i, 'name_hy']
+                    print(f"\n=== 抓取 {code} {name} ===")
+                    df_rst = self.fetch_plate_stocks_df(code)
+                    df_rst = process_df(df_rst,code,name)
+                    self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail')
+                    self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail_daily')
+                    if waitsecond is not None : time.sleep(waitsecond)
+        if df is None and plate_code_ori is None and plate_name is None:
+            df = self.db.qry2df(sql="select max(trade_date) as trade_date from qq_hy_hsj ")
+            sql = f"""select DISTINCT qhh.code_qqhy,qhh.name_hy
+            from qq_hy_hsj AS qhh where trade_date='{df.iat[0,0].strftime("%Y-%m-%d")}'
+            and not EXISTS (SELECT 1 FROM qq_hy_detail AS qhd
+            WHERE qhd.code_qqhy = qhh.code_qqhy and qhd.trade_date = '{self.trade_date.strftime("%Y-%m-%d")}')"""
+            df = self.db.qry2df(sql)
+            df = df.iloc[np.random.permutation(len(df))].reset_index(drop=True)
+        fetch_plate_stocks_db_sub(df=df,plate_code_ori=plate_code_ori,plate_name=plate_name,waitsecond=waitsecond)
+        return 0
+
+
+    async def fetch_xg_plate_stocks_df(self,plate_code_ori, plate_name,browser ):
+        """使用监控web中的request，获取行业（板块）下的个股详情"""
         base_url_path = "https://bisheng.tenpay.com/fcgi-bin/xg_plate_stocks.fcgi"
 
         context = browser.contexts[0]
@@ -1164,6 +1143,11 @@ if __name__ == "__main__":
     qq = Myqq()
     # asyncio.run(run_qq(qq=qq,again=0))
     # qq.fetch_quotes_db(codes=None)
+    # df = qq.fetch_plate_stocks_df(plate_code_ori="pt01801124") #pt01801111
+    # df = qq.fetch_plate_stocks_df(plate_code_ori="pt01801111") #pt01801111
+    df = pd.DataFrame({"code_qqhy":['pt01801082','pt01801111'],"name_hy":['其他电子Ⅱ','白色家电']})
+    qq.fetch_plate_stocks_db()
+
 
     embed()  # 进入交互式调试环境，方便你手动操作浏览器
 

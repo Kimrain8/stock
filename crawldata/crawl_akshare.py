@@ -4,7 +4,6 @@ import requests
 from requests.exceptions import RequestException, ProxyError, Timeout
 from datetime import datetime,date,timedelta
 import numpy as np
-import re
 import hashlib, time
 from urllib.parse import quote, urlencode, urlparse, parse_qs
 from typing import Optional, List
@@ -140,7 +139,7 @@ class Myak():
         return data
 
     def get_ak_companyinfo(self, symbol=None, proxy_pool: list = None,method="GET"):
-        """
+        """ 使用_request 函数
         调用巨潮 p_sysapi1018 业务接口，返回 pandas.DataFrame。
         :param symbol:      多个证券代码，如 "000408,300750"
         :param timeout:     请求超时（秒）
@@ -184,7 +183,7 @@ class Myak():
         return 0
     def get_ak_companyinfo2(self, symbol, timeout: int = 30,proxy_pool: list = None, max_retries: int = 3,
                        retry_sleep: tuple = (2, 6)):
-        """
+        """ 不使用_request
         调用巨潮 p_sysapi1018 业务接口，返回 pandas.DataFrame。
 
         :param symbol:      证券代码，如 "000408", "300750"
@@ -665,7 +664,10 @@ class Myak():
     
 if __name__ == "__main__":
     aks = Myak()
-    # rst = aks.get_ak_companyinfo(symbol='603137,920725,000504,000505') #,proxy_pool=["socks5h://127.0.0.1:9988"]
+    l = ['000004','000638','002231','002808','002898','300029','300344','300391','600193',
+        '600355','600421','600599','600608','600636','600696','603056','605081','688287',
+        '689009','920305']
+    rst = aks.get_ak_companyinfo(symbol=l) #,proxy_pool=["socks5h://127.0.0.1:9988"]
     # rst = aks.get_ak_companyinfo2(symbol='603137,920725,000504,000505') #,proxy_pool=["socks5h://127.0.0.1:9988"]
     # aks.fetch_ak_companyinfo()
     # rst = aks.get_ak_dividend(rdate='20260331')
@@ -678,5 +680,6 @@ if __name__ == "__main__":
     # rst = aks.get_share_float()
     # rst = aks.get_ak_Reduce()
     # rst = aks.get_ak_Increase()
-    rst = aks.get_ak_pfmc_frcst(rdate='20261231')
-    # embed()
+    # rst = aks.get_ak_pfmc_frcst(rdate='20261231')
+    embed()
+    

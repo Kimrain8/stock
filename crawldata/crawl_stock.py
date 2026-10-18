@@ -1,7 +1,9 @@
 import json
+import random
 import os
 import pandas as pd
 import requests
+from requests.exceptions import RequestException, ProxyError, Timeout
 from datetime import datetime,date,timedelta
 import numpy as np
 import re
@@ -11,6 +13,7 @@ import tushare as ts
 
 import asyncio #运行异步函数需要 asyncio.run() 来执行
 from playwright.async_api import async_playwright,TimeoutError as PlaywrightTimeoutError #使用异步方式连接到已启动的chrome浏览器
+from playwright.sync_api import sync_playwright
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator #将HTML内容解析成markdown格式
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig,CacheMode
 from crawl4ai.content_filter_strategy import PruningContentFilter #配合 DefaultMarkdownGenerator 使用，过滤掉不需要的内容
@@ -19,7 +22,6 @@ from crawl4ai.extraction_strategy import JsonCssExtractionStrategy #将网页内
 from types import SimpleNamespace #创建一个简单的对象，方便存储和访问属性
 from urllib.parse import quote, urlencode, urlparse, parse_qs
 
-from IPython import embed
 from utils.dbManager import MySQLHelper
 
 #region 获取腾讯网页中财经接口数据 getBoardRankList，并且查找指定的svg元素
@@ -33,27 +35,84 @@ class Myqq():
         self.db = MySQLHelper(db='jhd')
         self.trade_date = pd.Timestamp.now().date()
         self.max_trade_date = self.get_max_trade_date()
+        self._ENKEY_CACHE = {"value": None, "time": 0.0}
+        self._ENKEY_TTL = 50.0
     def get_max_trade_date(self):
         df = self.db.qry2df(f"""select max(trade_date) as trade_date from qq_hsj AS ttd""") 
         return pd.Timestamp.now().date() if pd.isna(df.iloc[0,0]) else pd.to_datetime(df.iloc[0,0]).date()
-    @staticmethod
-    def get_qq_sign(plate_code, exchange=12, sort_type=1, source='zxg', stocks_type=3, user_type=4, t=int(time.time() * 1000)):
+    def get_qq_sign(self,params, t=int(time.time() * 1000)):
         """获取行业对应的股票明细api,生成需要的动态sign值, plate_code只含数字
         引用：
         t = int(time.time() * 1000)  # 毫秒时间戳
-        sign = gen_sign("12", "01801733", "1", "zxg", "3", "4", t)"""
+        sign = gen_sign("12", "01801733", "1", "zxg", "3", "4", t)
+        """
         params = {
-            "exchange": exchange,
-            "plate_code": plate_code,
-            "sort_type": sort_type,
-            "source": source,
-            "stocks_type": stocks_type,
+            "exchange": params["exchange"],
+            "plate_code": params["plate_code"],
+            "sort_type": params["sort_type"],
+            "source": params["source"],
+            "stocks_type": params["stocks_type"],
             "time": t,
-            "user_type": user_type,
+            "user_type": params["user_type"],
         }
         s = "&".join(f"{k}={v}" for k, v in params.items())
         s += "&key=7ad247390dafce0cf9911de0f2083eba"
-        return hashlib.md5(s.encode()).hexdigest()
+        token = hashlib.md5(s.encode()).hexdigest()
+        return token
+    def _request(self,data_url: str, params: dict, rhead: dict,rtype:str = 'json',  
+                    method: str = "GET",timeout: int = 30, proxy_pool: list = None,
+                    max_retries: int = 3, retry_sleep: tuple = (2, 6)):
+        """按 method("GET"/"POST")请求一个 sysapi 并返回 records 列表；失败返回 -1。"""
+        method = method.upper()
+        if method not in ("GET", "POST"):
+            raise ValueError(f"method 只支持 'GET' / 'POST'，收到 {method!r}")
+        if proxy_pool is None:
+            proxy_pool = getattr(self, "proxy_pool", None)
+        if proxy_pool is None:
+            alive = None
+            single_proxy = None
+            bad_proxy = None
+        else:
+            single_proxy = len(proxy_pool) == 1
+            bad_proxy = getattr(self, "_BAD_PROXY", {})
+            self._BAD_PROXY = bad_proxy
+            alive = [p for p in proxy_pool if bad_proxy.get(p, 0) < 3] or proxy_pool
+        
+        def _do_request():
+            last_exc = None
+            for attempt in range(max_retries):
+                proxy = random.choice(alive) if alive else None
+                proxies = {"http": proxy, "https": proxy} if proxy else None
+                try:
+                    with requests.Session() as session:
+                        session.headers.update(rhead)
+                        resp = session.request(method, data_url, params=params,
+                                                timeout=timeout, proxies=proxies)
+                        resp.raise_for_status()
+                        if rtype == 'json':
+                            return resp.json()
+                        elif rtype == 'str':
+                            return resp
+                except (ProxyError, Timeout) as e:
+                    if not single_proxy and proxy:
+                        bad_proxy[proxy] = bad_proxy.get(proxy, 0) + 1
+                        alive[:] = [p for p in alive if bad_proxy.get(p, 0) < 3] or proxy_pool
+                    last_exc = e
+                except RequestException as e:
+                    last_exc = e
+                if attempt < max_retries - 1:
+                    wait = random.uniform(*retry_sleep)
+                    print(f"[重试 {attempt + 1}/{max_retries}] 等待 {wait:.2f}s …")
+                    time.sleep(wait)
+            raise last_exc if last_exc else RuntimeError("request failed")
+
+        data = _do_request()
+        # 令牌失效重试（换 key，同样走代理）
+        if isinstance(data, dict) and data.get("resultcode") in (401, 451):
+            time.sleep(random.uniform(*retry_sleep))
+            data = _do_request()
+        return data
+
     async def get_qq_getBoardRankList(self,page, board_code = "aStock",offset: int = 0, count: int = 20):
         """获取腾讯 hsj股票数据,使用page环境的request,直接调用api接口"""
         base_url = "https://proxy.finance.qq.com/cgi/cgi-bin/rank/hs/getBoardRankList"
@@ -202,8 +261,9 @@ class Myqq():
         df["symbol_hy"] = df['code_qqhy'].str.extract(r'(\d+)')
         df['lzg'] = df["lzg"].apply(lambda x: json.dumps(x, ensure_ascii=False))
         self.db.bulkInsUpd(df,table="qq_hy_hsj")
+
     async def fetch_xg_plate_stocks_df(self,plate_code_ori, plate_name,browser ):
-        """获取行业（板块）下的个股详情"""
+        """获取行业（板块）下的个股详情, 使用侦听页面的方式获取。"""
         base_url_path = "https://bisheng.tenpay.com/fcgi-bin/xg_plate_stocks.fcgi"
 
         context = browser.contexts[0]
@@ -274,7 +334,7 @@ class Myqq():
         df = pd.DataFrame(rank_list)
         return df
     async def fetch_xg_plate_stocks_db(self,df=None,plate_code_ori=None, plate_name=None,waitsecond=None):
-        """获取行业（板块）下的个股详情"""
+        """获取行业（板块）下的个股详情, 使用侦听页面的方式获取。"""
         def process_df(df,pcode,pname):
             df.rename(columns={"stock_code": "ts_code","stock_name":"name","price":"zxj","change_percent":"pct_chg",
                                 "price_change":"change_amount","market_cap":"zsz",
@@ -329,6 +389,75 @@ class Myqq():
             df = self.db.qry2df(sql)
             df = df.iloc[np.random.permutation(len(df))].reset_index(drop=True)
             await self.fetch_xg_plate_stocks_db(df=df)
+    def fetch_plate_stocks_df(self,plate_code_ori ):
+        """获取行业（板块）下的个股详情。直接获取sign，然后获取api数据 """
+        base_url_path = "https://bisheng.tenpay.com/fcgi-bin/xg_plate_stocks.fcgi"
+        plate_code = next(iter(re.findall(r"\d+", plate_code_ori)), None)
+        params = {
+                    "exchange": 12, #"mod": "list", 
+                    "plate_code": plate_code, #"id": plate_code_ori,
+                    "sort_type": 1, #"typename": plate_name,
+                    "source": "zxg", #"sign": 'web'
+                    "stocks_type": 3,
+                    "time": "",
+                    "user_type": 4,
+                }
+        _t = int(time.time() * 1000)
+        token = self.get_qq_sign(params=params,t=_t)
+        params.update({"sign": token,"time":_t})
+        rhead = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Referer": "https://stockapp.finance.qq.com/",
+            }
+        api_data = self._request(data_url=base_url_path,params=params,rhead=rhead)
+        if api_data is None or api_data.get('stocks') is None:
+            api_data = {}
+        rank_list = api_data.get("stocks", {}).get("stocks_list", [])
+        df = pd.DataFrame(rank_list)
+        return df
+    def fetch_plate_stocks_db(self,df=None,plate_code_ori=None, plate_name=None,waitsecond=None):
+        """获取行业（板块）下的个股详情"""
+        def process_df(df,pcode,pname):
+            df.rename(columns={"stock_code": "ts_code","stock_name":"name","price":"zxj","change_percent":"pct_chg",
+                                "price_change":"change_amount","market_cap":"zsz",
+                                "liutong_cap":"ltsz","main_net_inflow":"zljlr","turnover_amount":"vol",
+                                "turnover_money":"amount","turnover_ratio":"hsl",
+                                "amplitude":"zf","quantity_ratio":"lb","stock_type":"market"}, inplace=True)
+            df["trade_date"] = self.trade_date #- pd.Timedelta(days=1)
+            df["symbol"] = df['ts_code'].str.extract(r'(\d+)')
+            df['tags'] = df["tags"].apply(lambda x: json.dumps(x, ensure_ascii=False))
+            df['code_qqhy'] = pcode
+            df['symbol_hy'] = df['code_qqhy'].str.extract(r'(\d+)')
+            df['name_hy'] = pname
+            return df
+        def fetch_plate_stocks_db_sub(df=None,plate_code_ori=None, plate_name=None,waitsecond=None):
+            if df is None and plate_code_ori is not None and plate_name is not None:
+                df_rst = self.fetch_plate_stocks_df(plate_code_ori)
+                df_rst = process_df(df_rst,plate_code_ori,plate_name)
+                self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail')
+                self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail_daily')
+            elif df is not None:
+                for i in range(len(df)):
+                    code = df.loc[i, 'code_qqhy']
+                    name = df.loc[i, 'name_hy']
+                    print(f"\n=== 抓取 {code} {name} ===")
+                    df_rst = self.fetch_plate_stocks_df(code)
+                    df_rst = process_df(df_rst,code,name)
+                    self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail')
+                    self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail_daily')
+                    if waitsecond is not None : time.sleep(waitsecond)
+        if df is None and plate_code_ori is None and plate_name is None:
+            df = self.db.qry2df(sql="select max(trade_date) as trade_date from qq_hy_hsj ")
+            sql = f"""select DISTINCT qhh.code_qqhy,qhh.name_hy
+            from qq_hy_hsj AS qhh where trade_date='{df.iat[0,0].strftime("%Y-%m-%d")}'
+            and not EXISTS (SELECT 1 FROM qq_hy_detail AS qhd
+            WHERE qhd.code_qqhy = qhh.code_qqhy and qhd.trade_date = '{self.trade_date.strftime("%Y-%m-%d")}')"""
+            df = self.db.qry2df(sql)
+            df = df.iloc[np.random.permutation(len(df))].reset_index(drop=True)
+        fetch_plate_stocks_db_sub(df=df,plate_code_ori=plate_code_ori,plate_name=plate_name,waitsecond=waitsecond)
+        return 0
+
     
     def get_qq_quotes_df(self,codes):
         """
@@ -397,7 +526,7 @@ class Myqq():
         """codes :list类型, 是qqcode的格式: sz000408"""
         if codes is None:
             sql = f"""select distinct qh.qq_code from qq_hsj AS qh
-            where qh.trade_date  = CURDATE()-1
+            where qh.trade_date  = CURDATE()
             and not EXISTS (SELECT 1 FROM qq_qt AS qq where qh.qq_code = qq.qq_code and qh.trade_date = qq.trade_date )"""
             df2 = self.db.qry2df(sql=sql)
             df2 = df2.iloc[np.random.permutation(len(df2))].reset_index(drop=True)
@@ -550,7 +679,7 @@ class Myqq():
                 
                 html = await page.content()
             return html
-    
+
 #region Myts类，从tushare中获取交易日历/股票清单/日交易信息
 class Myts():
     def __init__(self):
@@ -758,6 +887,7 @@ def myJson2txt(jfile,txtfile):
 
 #endregion
 if __name__ == "__main__":
+    from IPython import embed
     #下面是获取交易日历，股票清单，日交易数据
     ts = Myts()
     # ts.get_trade_calendar() #获取交易日历
@@ -767,6 +897,11 @@ if __name__ == "__main__":
     qq = Myqq()
     # asyncio.run(qq.fetch_getBoardRankList_db())
     # asyncio.run(qq.fetch_getRank_db())
+    # df = asyncio.run(qq.fetch_xg_plate_stocks_db(plate_code_ori="pt01801111",plate_name="白色家电"))
+    # df = asyncio.run(qq.fetch_xg_plate_stocks_db(plate_code_ori="pt01801124",plate_name="食品加工"))
+    df = pd.DataFrame({"code_qqhy":['pt01801082','pt01801111'],"name_hy":['其他电子Ⅱ','白色家电']})
+    qq.fetch_plate_stocks_db(df=df)
+    # df = qq.fetch_plate_stocks_df(plate_code_ori='pt01801082')
     # asyncio.run(qq.fetch_batch_plate_db())
     # qq.fetch_quotes_db(codes=None) #获取qq_qt数据
     # rst = qq.get_qq_gudong(qq_code='sz001232') #

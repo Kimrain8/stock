@@ -22,7 +22,7 @@
       "name": "get_trade_calendar",
       "func": "ts:get_trade_calendar",
       "interval": "D_1",
-      "start_at": "2026-10-15 18:04:00",
+      "start_at": "2026-10-17 17:25:00",
       "validate": 1,
       "deps": [],
       "params": {}
@@ -65,13 +65,13 @@
       "params": {}
     },
     {
-      "name": "fetch_batch_plate_db",
-      "func": "qq:fetch_batch_plate_db",
+      "name": "fetch_plate_stocks_db",
+      "func": "qq:fetch_plate_stocks_db",
       "interval": 0,
       "start_at": null,
       "validate": 1,
       "retry": 4,
-      "retry_backoff": [2, 4, 5,3],
+      "retry_backoff": [2, 4, 5, 3],
       "deps": ["fetch_getRank_db"],
       "params": {}
     },
@@ -81,7 +81,7 @@
       "interval": 0,
       "start_at": null,
       "validate": 1,
-      "deps": ["fetch_batch_plate_db"],
+      "deps": ["fetch_plate_stocks_db"],
       "params": {}
     },
     {

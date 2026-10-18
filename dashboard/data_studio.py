@@ -1,4 +1,5 @@
-"""数据工作室 — SQL + Panel 原生图表配置 + 可拖拽仪表板"""
+"""数据可视化 — SQL + Panel 原生图表配置 + 可拖拽仪表板"""
+import io
 import logging
 import os
 import pickle
@@ -21,6 +22,12 @@ try:
 except ImportError:
     Turbo256 = None
 
+try:
+    import openpyxl  # noqa
+    _HAS_OPENPYXL = True
+except ImportError:
+    _HAS_OPENPYXL = False
+
 from utils.dbManager import MySQLHelper
 from .auth import sessions
 from .config import settings
@@ -36,7 +43,10 @@ except ImportError:
     HAS_TILES = False
     logger.warning("panel-tiles 未安装，仪表板将使用简单 Column 布局")
 
+# 默认值（UI 上可调）
 MAX_ROWS_DEFAULT = 100000
+MAX_GROUPS_DEFAULT = 5000
+RENDER_GROUPS_LIMIT_DEFAULT = 100
 
 # ============================================================
 # 通用样式
@@ -62,7 +72,7 @@ _BIG_PALETTES = {
     "Turbo": Turbo256,
 }
 
-PALETTE_SIZE = 20
+PALETTE_SIZE = 200
 
 
 def _sample_palette(name: str, n: int = PALETTE_SIZE):
@@ -364,22 +374,31 @@ def _dt_to_ms(s: pd.Series) -> pd.Series:
 # ============================================================
 def _build_axis_figure(df: pd.DataFrame, x_col: str,
                        left_cfg: dict, right_cfg: dict, hidden_cfg: dict,
-                       height: int = 500):
+                       height: int = 500,
+                       out: dict | None = None,
+                       max_groups: int = MAX_GROUPS_DEFAULT,
+                       render_limit: int = RENDER_GROUPS_LIMIT_DEFAULT,
+                       render_order: str = "head"):
+    """render_order: 'head' 前 N 条 / 'tail' 后 N 条。"""
     d = df.copy()
     if d.empty or x_col not in d.columns:
+        if out is not None:
+            out["chart_df"] = pd.DataFrame()
+            out["title"] = ""
+            out["warning"] = ""
         return None
 
     def _valid_rows(cfg):
-        out = []
+        out_rows = []
         for r in cfg.get("rows") or []:
             v = r.get("var")
             if v and v in d.columns:
-                out.append({
+                out_rows.append({
                     "var": v,
                     "color": r.get("color") if r.get("color") not in (None, "", "(无)") else None,
                     "size": r.get("size") if r.get("size") not in (None, "", "(无)") else None,
                 })
-        return out
+        return out_rows
 
     left_rows = _valid_rows(left_cfg)
     right_rows = _valid_rows(right_cfg)
@@ -396,49 +415,92 @@ def _build_axis_figure(df: pd.DataFrame, x_col: str,
         hidden_rows = []
 
     if not (left_rows or right_rows or hidden_rows):
+        if out is not None:
+            out["chart_df"] = pd.DataFrame()
+            out["title"] = ""
+            out["warning"] = ""
         return None
 
     d, is_dt = _prepare_x(d, x_col)
     if d.empty:
+        if out is not None:
+            out["chart_df"] = pd.DataFrame()
+            out["title"] = ""
+            out["warning"] = ""
         return None
 
-    series_defs = []
+    # ---------- 收集所有系列（按 max_groups 上限） ----------
+    all_defs = []
+    collect_stopped = False
 
     def _collect(rows, chart_type, axis_key):
+        nonlocal collect_stopped
         for row in rows:
+            if collect_stopped:
+                return
             yc = row["var"]
             cf = row.get("color")
             sf = row.get("size")
             ys = pd.to_numeric(d[yc], errors="coerce")
+            valid = ys.notna()
+            if not valid.any():
+                continue
             if cf and cf in d.columns:
-                groups = list(d[cf].astype(str).unique())[:10]
-                for g in groups:
-                    mask = ys.notna() & (d[cf].astype(str) == g)
-                    idxs = d.index[mask].tolist()
-                    if idxs:
-                        series_defs.append({
-                            "axis_key": axis_key, "chart_type": chart_type,
-                            "var": yc, "group": g,
-                            "color_field": cf, "size_field": sf,
-                            "indices": idxs,
-                        })
+                d_valid = d.loc[valid]
+                g_vals = d_valid[cf].astype(str)
+                for g, idxs in g_vals.groupby(g_vals, sort=False).groups.items():
+                    idx_list = list(idxs)
+                    if not idx_list:
+                        continue
+                    all_defs.append({
+                        "axis_key": axis_key, "chart_type": chart_type,
+                        "var": yc, "group": g,
+                        "color_field": cf, "size_field": sf,
+                        "indices": idx_list,
+                    })
+                    if len(all_defs) >= max_groups:
+                        collect_stopped = True
+                        return
             else:
-                idxs = d.index[ys.notna()].tolist()
+                idxs = d.index[valid].tolist()
                 if idxs:
-                    series_defs.append({
+                    all_defs.append({
                         "axis_key": axis_key, "chart_type": chart_type,
                         "var": yc, "group": None,
                         "color_field": None, "size_field": sf,
                         "indices": idxs,
                     })
+                    if len(all_defs) >= max_groups:
+                        collect_stopped = True
+                        return
 
     _collect(left_rows, left_type, "left")
     _collect(right_rows, right_type, "right")
     _collect(hidden_rows, hidden_type, "hidden")
 
-    if not series_defs:
+    total_groups = len(all_defs)
+    if not all_defs:
+        if out is not None:
+            out["chart_df"] = pd.DataFrame()
+            out["title"] = ""
+            out["warning"] = ""
         return None
 
+    # ---------- 按 render_limit + 方向截取 ----------
+    render_limit = max(1, int(render_limit or 1))
+    truncated = total_groups > render_limit
+    if truncated:
+        if str(render_order).lower() == "tail":
+            series_defs = all_defs[-render_limit:]
+            order_label = f"后 {render_limit}"
+        else:
+            series_defs = all_defs[:render_limit]
+            order_label = f"前 {render_limit}"
+    else:
+        series_defs = all_defs
+        order_label = ""
+
+    # ---------- 标题 ----------
     title_parts = []
     if left_rows:
         title_parts.append("左:" + ",".join(r["var"] for r in left_rows))
@@ -448,12 +510,26 @@ def _build_axis_figure(df: pd.DataFrame, x_col: str,
         title_parts.append("隐:" + ",".join(r["var"] for r in hidden_rows))
     title = " | ".join(title_parts) + f"  vs  {x_col}"
 
+    # ---------- 警告 ----------
+    warns = []
+    if truncated:
+        warns.append(
+            f"共 {total_groups} 个系列，仅渲染{order_label}条")
+    if collect_stopped:
+        warns.append(f"收集已在 {max_groups} 上限停止")
+    warning = "⚠️ " + "；".join(warns) if warns else ""
+
+    # ---------- 构建 figure ----------
     fig = figure(
-        height=height, title=title,
+        height=height,
         x_axis_type="datetime" if is_dt else "auto",
         tools="pan,box_zoom,reset,xwheel_zoom",
         toolbar_location="above",
     )
+    try:
+        fig.title.visible = False
+    except Exception:
+        pass
     fig.grid.grid_line_alpha = 0.3
 
     if right_rows:
@@ -477,6 +553,7 @@ def _build_axis_figure(df: pd.DataFrame, x_col: str,
     if left_rows:
         fig.yaxis.axis_label = ", ".join(r["var"] for r in left_rows[:3])
 
+    # 柱宽
     if is_dt:
         uniq = pd.Series(d[x_col]).drop_duplicates().sort_values()
         if len(uniq) >= 2:
@@ -511,6 +588,7 @@ def _build_axis_figure(df: pd.DataFrame, x_col: str,
 
     axis_renderers = {"left": [], "right": [], "hidden": []}
     all_renderers = []
+    chart_records = []
 
     for sd in series_defs:
         axis_key = sd["axis_key"]
@@ -603,10 +681,22 @@ def _build_axis_figure(df: pd.DataFrame, x_col: str,
         if renderer is not None:
             all_renderers.append(renderer)
             axis_renderers[axis_key].append(renderer)
+            if out is not None:
+                tmp = sub.copy()
+                tmp["_axis"] = axis_key
+                tmp["_chart_type"] = chart_type
+                tmp["_legend"] = legend
+                tmp["_color_hex"] = color
+                chart_records.append(tmp)
 
     if not all_renderers:
+        if out is not None:
+            out["chart_df"] = pd.DataFrame()
+            out["title"] = ""
+            out["warning"] = ""
         return None
 
+    # 绑定 renderers 到 y_range
     if axis_renderers["left"]:
         try:
             if isinstance(fig.y_range, DataRange1d):
@@ -658,6 +748,18 @@ def _build_axis_figure(df: pd.DataFrame, x_col: str,
     hover.renderers = all_renderers
     fig.add_tools(hover)
 
+    if out is not None:
+        out["title"] = title
+        out["warning"] = warning
+        if chart_records:
+            try:
+                out["chart_df"] = pd.concat(chart_records, ignore_index=True)
+            except Exception:
+                logger.exception("concat chart records failed")
+                out["chart_df"] = pd.DataFrame()
+        else:
+            out["chart_df"] = pd.DataFrame()
+
     return fig
 
 
@@ -672,6 +774,9 @@ def build_data_studio():
         state = {
             "df_raw": pd.DataFrame(),
             "df": pd.DataFrame(),
+            "chart_df": pd.DataFrame(),
+            "chart_title": "",
+            "chart_warning": "",
             "tile_objects": [],
             "tile_layout": [],
         }
@@ -717,9 +822,8 @@ def build_data_studio():
             show_index=False, configuration={"editable": False},
         )
         agg_row = pn.Row(sizing_mode="stretch_width", margin=(0, 0, 0, 0))
-        agg_widgets = []  # List[(col, Select)]
+        agg_widgets = []
 
-        # 工具条控件
         clear_all_btn = pn.widgets.Button(
             name="清空所有列", width=100, button_type="warning",
             styles=SMALL_SELECT_STYLE, margin=SMALL_SELECT_MARGIN)
@@ -736,7 +840,6 @@ def build_data_studio():
             sizing_mode="stretch_width",
         )
 
-        # 全部一行：清空 + 焦点列下拉 + 复制 + 说明
         agg_toolbar = pn.Row(
             clear_all_btn,
             dup_col_sel,
@@ -770,13 +873,13 @@ def build_data_studio():
 
         def _make_axis_row(axis_key):
             var_sel = pn.widgets.Select(
-                name="", options=[], width=120,
+                name="", options=[], width=100,
                 styles=SMALL_SELECT_STYLE, margin=SMALL_SELECT_MARGIN)
             color_sel = pn.widgets.Select(
-                name="", options=["(无)"], value="(无)", width=110,
+                name="", options=["(无)"], value="(无)", width=90,
                 styles=SMALL_SELECT_STYLE, margin=SMALL_SELECT_MARGIN)
             size_sel = pn.widgets.Select(
-                name="", options=["(无)"], value="(无)", width=90,
+                name="", options=["(无)"], value="(无)", width=70,
                 styles=SMALL_SELECT_STYLE, margin=SMALL_SELECT_MARGIN)
             del_btn = pn.widgets.Button(name="×", width=26,
                                         button_type="default",
@@ -850,11 +953,96 @@ def build_data_studio():
         for s in (left_type_sel, right_type_sel, hidden_type_sel):
             s.param.watch(lambda e: _update_preview(), "value")
 
+        # ---------- 渲染参数控件 ----------
+        max_rows_input = pn.widgets.IntInput(
+            name="SQL最大行数", value=MAX_ROWS_DEFAULT, step=10000,
+            start=100, width=120,
+            styles=SMALL_SELECT_STYLE, margin=SMALL_SELECT_MARGIN)
+
+        max_groups_input = pn.widgets.IntInput(
+            name="收集系列上限", value=MAX_GROUPS_DEFAULT, step=500,
+            start=10, width=120,
+            styles=SMALL_SELECT_STYLE, margin=SMALL_SELECT_MARGIN)
+
+        render_limit_input = pn.widgets.IntInput(
+            name="渲染上限", value=RENDER_GROUPS_LIMIT_DEFAULT, step=10,
+            start=1, width=110,
+            styles=SMALL_SELECT_STYLE, margin=SMALL_SELECT_MARGIN)
+
+        render_order_sel = pn.widgets.Select(
+            name="方向", options=["前 N 条", "后 N 条"],
+            value="前 N 条", width=110,
+            styles=SMALL_SELECT_STYLE, margin=SMALL_SELECT_MARGIN)
+
+        # 修改这三个输入触发重绘
+        for w in (max_groups_input, render_limit_input, render_order_sel):
+            w.param.watch(lambda e: _update_preview(), "value")
+
+        # ---------- 添加到仪表板按钮 ----------
         add_btn = pn.widgets.Button(name="➕ 添加到仪表板",
-                                    button_type="primary", width=180,
-                                    styles=SMALL_SELECT_STYLE)
+                                    button_type="primary", width=200,
+                                    styles=SMALL_SELECT_STYLE,
+                                    margin=(6, 0, 0, 0))
 
         preview_pane = pn.pane.Bokeh(sizing_mode="stretch_width", height=500)
+
+        # ---------- 图/表切换 + 导出 ----------
+        view_toggle = pn.widgets.RadioButtonGroup(
+            name="", options=["📈 图", "📋 表"], value="📈 图",
+            width=140, styles=SMALL_SELECT_STYLE,
+            margin=SMALL_SELECT_MARGIN)
+
+        chart_table = pn.widgets.Tabulator(
+            pd.DataFrame(), page_size=20,
+            sizing_mode="stretch_width", height=500,
+            show_index=False, configuration={"editable": False},
+        )
+        chart_table.visible = False
+
+        def _make_chart_xlsx():
+            df = state.get("chart_df")
+            if df is None or df.empty:
+                return io.BytesIO(b"")
+            buf = io.BytesIO()
+            if _HAS_OPENPYXL:
+                try:
+                    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                        df.to_excel(writer, index=False)
+                except Exception:
+                    logger.exception("to_excel failed, fallback to csv")
+                    buf = io.BytesIO()
+                    buf.write(df.to_csv(index=False).encode("utf-8-sig"))
+            else:
+                buf.write(df.to_csv(index=False).encode("utf-8-sig"))
+            buf.seek(0)
+            return buf
+
+        export_filename = "chart_data.xlsx" if _HAS_OPENPYXL else "chart_data.csv"
+        export_btn = pn.widgets.FileDownload(
+            label="⬇ 导出 xlsx" if _HAS_OPENPYXL else "⬇ 导出 csv",
+            filename=export_filename,
+            callback=_make_chart_xlsx,
+            button_type="default", width=130,
+            styles=SMALL_SELECT_STYLE, margin=SMALL_SELECT_MARGIN,
+        )
+
+        def _on_view_change(event):
+            if view_toggle.value == "📋 表":
+                df = state.get("chart_df")
+                if df is None or df.empty:
+                    chart_table.value = pd.DataFrame()
+                else:
+                    try:
+                        chart_table.value = _sanitize_df(df.head(200))
+                    except Exception:
+                        chart_table.value = df.head(200)
+                preview_pane.visible = False
+                chart_table.visible = True
+            else:
+                preview_pane.visible = True
+                chart_table.visible = False
+
+        view_toggle.param.watch(_on_view_change, "value")
 
         if HAS_TILES:
             dashboard = TileGrid(objects=[], layout=[],
@@ -883,30 +1071,69 @@ def build_data_studio():
                 "rows": rows,
             }
 
+        preview_title_pane = pn.pane.Markdown(
+            "", styles={"font-size": "12px", "color": "#555"},
+            margin=(4, 8, 0, 0),
+        )
+
         def _build_current_figure():
             df = state["df"]
             if df.empty or not x_sel.value:
+                state["chart_df"] = pd.DataFrame()
+                state["chart_title"] = ""
+                state["chart_warning"] = ""
                 return None
             try:
-                return _build_axis_figure(
+                out = {}
+                fig = _build_axis_figure(
                     df, x_sel.value,
                     _read_axis_cfg("left"),
                     _read_axis_cfg("right"),
                     _read_axis_cfg("hidden"),
                     height=500,
+                    out=out,
+                    max_groups=int(max_groups_input.value or MAX_GROUPS_DEFAULT),
+                    render_limit=int(render_limit_input.value or RENDER_GROUPS_LIMIT_DEFAULT),
+                    render_order=("tail" if render_order_sel.value == "后 N 条" else "head"),
                 )
-            except Exception:
+                state["chart_df"] = out.get("chart_df", pd.DataFrame())
+                state["chart_title"] = out.get("title", "")
+                state["chart_warning"] = out.get("warning", "")
+                return fig
+            except Exception as e:
                 logger.exception("build figure failed")
+                state["chart_df"] = pd.DataFrame()
+                state["chart_title"] = ""
+                state["chart_warning"] = f"❌ {type(e).__name__}: {e}"
                 return None
 
+        def _update_preview_title():
+            parts = []
+            if state.get("chart_title"):
+                parts.append(state["chart_title"])
+            if state.get("chart_warning"):
+                parts.append(
+                    f"<span style='color:#e57300'>{state['chart_warning']}</span>")
+            preview_title_pane.object = "  ·  ".join(parts) if parts else ""
+
         def _update_preview():
-            preview_pane.object = _build_current_figure()
+            fig = _build_current_figure()
+            preview_pane.object = fig
+            _update_preview_title()
+            if view_toggle.value == "📋 表":
+                df = state.get("chart_df")
+                if df is None or df.empty:
+                    chart_table.value = pd.DataFrame()
+                else:
+                    try:
+                        chart_table.value = _sanitize_df(df.head(200))
+                    except Exception:
+                        chart_table.value = df.head(200)
 
         x_sel.param.watch(lambda e: _update_preview(), "value")
 
         # ---------- 聚合行构建 ----------
         def _build_agg_row(cols, preserve=None):
-            """preserve: dict {col: op}，重建时保留已选 op。"""
             state["_building"] = True
             try:
                 agg_widgets.clear()
@@ -941,13 +1168,11 @@ def build_data_studio():
                 logger.exception("aggregation failed")
                 state["df"] = state["df_raw"].copy()
 
-            # ---- 更新预览表（显示聚合后的数据）----
             try:
                 preview_table.value = _sanitize_df(state["df"].head(20))
             except Exception:
                 logger.exception("update preview table failed")
 
-            # 状态栏明确说明：聚合基于完整数据
             try:
                 status.object = (
                     f"聚合结果:{len(state['df']):,} 行 × "
@@ -957,11 +1182,10 @@ def build_data_studio():
                 )
             except Exception:
                 pass
-            
+
             cols = state["df"].columns.tolist()
             num_cols = state["df"].select_dtypes(include="number").columns.tolist()
 
-            # ---- x 轴 ----
             x_sel.options = cols
             if cols:
                 if not x_sel.value or x_sel.value not in cols:
@@ -975,13 +1199,11 @@ def build_data_studio():
                 except Exception:
                     pass
 
-            # ---- 三个轴 ----
             for key in ("left", "right", "hidden"):
                 for r in axis_holders[key]:
                     r["var"].options = cols
                     r["color"].options = ["(无)"] + cols
                     r["size"].options = ["(无)"] + num_cols
-                    # 无效值重置
                     if r["var"].value not in cols:
                         r["var"].value = cols[0] if cols else None
                     if r["color"].value != "(无)" and r["color"].value not in cols:
@@ -989,7 +1211,6 @@ def build_data_studio():
                     if r["size"].value != "(无)" and r["size"].value not in num_cols:
                         r["size"].value = "(无)"
 
-            # ---- 若结果 0 列，彻底清空三个轴 ----
             if not cols:
                 for key in ("left", "right", "hidden"):
                     try:
@@ -1011,7 +1232,6 @@ def build_data_studio():
 
             cols = state["df_raw"].columns.tolist()
 
-            # 1. 重建 agg 行，全部 "(空)"
             state["_building"] = True
             try:
                 agg_widgets.clear()
@@ -1028,23 +1248,20 @@ def build_data_studio():
             finally:
                 state["_building"] = False
 
-            # 2. 清空 state["df"]
             state["df"] = pd.DataFrame()
+            state["chart_df"] = pd.DataFrame()
 
-            # 3. 清空预览表
             try:
                 preview_table.value = pd.DataFrame()
             except Exception:
                 pass
 
-            # 4. 清空 x 轴（options + value）
             try:
                 x_sel.options = []
                 x_sel.value = None
             except Exception:
                 pass
 
-            # 5. 清空三个轴（显示方式 + 变量行）
             for key in ("left", "right", "hidden"):
                 try:
                     axis_type_sels[key].value = "无"
@@ -1053,8 +1270,8 @@ def build_data_studio():
                 axis_holders[key].clear()
                 _refresh_axis_rows(key)
 
-            # 6. 清空预览图
             preview_pane.object = None
+            chart_table.value = pd.DataFrame()
 
             status.object = "**🧹 已清空所有列，并清空 x轴 / 左轴 / 右轴 / 隐藏轴**"
 
@@ -1067,7 +1284,6 @@ def build_data_studio():
             if not target or target not in state["df_raw"].columns:
                 status.object = "**⚠️ 请选择要复制的焦点列**"
                 return
-            # 找不冲突的新名字
             i = 1
             while True:
                 new_name = f"{target}_c{i}"
@@ -1081,12 +1297,10 @@ def build_data_studio():
                 status.object = f"**❌ 复制失败：{e}**"
                 return
 
-            # 保留当前 op，重建聚合行（新列默认原字段名）
             old_specs = {c: sel.value for c, sel in agg_widgets}
             old_specs[new_name] = new_name
             _build_agg_row(state["df_raw"].columns.tolist(), preserve=old_specs)
 
-            # 触发聚合 + 刷新预览表 + 刷新 x/左右隐藏轴
             _on_agg_change()
 
             dup_col_sel.value = new_name
@@ -1104,6 +1318,7 @@ def build_data_studio():
             df = _normalize_columns(df)
             state["df_raw"] = df
             state["df"] = df.copy()
+            state["chart_df"] = pd.DataFrame()
             preview_table.value = _sanitize_df(df.head(20))
             status.object = (f"**✅ {source_label}** · "
                              f"{len(df)} 行 × {len(df.columns)} 列")
@@ -1136,7 +1351,8 @@ def build_data_studio():
         def _on_exec(event):
             try:
                 status.object = "**⏳ 执行中...**"
-                df = _exec_sql(sql_editor.value, max_rows=MAX_ROWS_DEFAULT)
+                df = _exec_sql(sql_editor.value,
+                               max_rows=int(max_rows_input.value or MAX_ROWS_DEFAULT))
                 _apply_loaded_df(df, "SQL 执行成功")
                 logger.info("exec ok | rows=%d | cols=%d",
                             len(df), len(df.columns) if df is not None else 0)
@@ -1212,7 +1428,7 @@ def build_data_studio():
 
         header = pn.Row(
             pn.pane.Markdown(
-                f"### 🎨 数据工作室 · {username} "
+                f"### 🎨 数据可视化 · {username} "
                 f"<span style='color:#888;font-size:12px'>· {role}</span>",
                 margin=(0, 8, 0, 0),
             ),
@@ -1223,9 +1439,8 @@ def build_data_studio():
             pn.Row(
                 pn.pane.Markdown("### 📝 SQL", margin=(0, 0, 0, 0),
                                  styles={"font-size": "14px"}),
-                pn.Spacer(width=10),
                 table_select,
-                sizing_mode="stretch_width", margin=(0, 0, 2, 0),
+                margin=(0, 0, 2, 0),
             ),
             sql_editor,
             pn.Row(
@@ -1263,9 +1478,19 @@ def build_data_studio():
                 styles={"gap": "2px"},
             )
 
-        config_panel = pn.Column(
-            pn.pane.Markdown("### ⚙️ 图表配置", margin=(0, 0, 4, 0),
-                             styles={"font-size": "14px"}),
+        # ★ 渲染参数块（放 add_btn 上方）
+        render_params_block = pn.Column(
+            pn.pane.Markdown("**🎛 渲染参数**", margin=(0, 0, 2, 0),
+                             styles={"font-size": "13px"}),
+            pn.Row(max_rows_input, max_groups_input,
+                   sizing_mode="stretch_width", margin=(0, 0, 2, 0)),
+            pn.Row(render_limit_input, render_order_sel,
+                   sizing_mode="stretch_width", margin=(0, 0, 2, 0)),
+            sizing_mode="stretch_width", margin=(0, 0, 2, 0),
+            styles={"gap": "2px"},
+        )
+
+        config_body = pn.Column(
             x_sel,
             pn.layout.Divider(margin=(2, 0, 2, 0)),
             _axis_block("🟦 左轴", "left"),
@@ -1274,7 +1499,16 @@ def build_data_studio():
             pn.layout.Divider(margin=(2, 0, 2, 0)),
             _axis_block("⬜ 隐藏轴（可选，不显示刻度）", "hidden"),
             pn.layout.Divider(margin=(2, 0, 2, 0)),
+            render_params_block,
             add_btn,
+            sizing_mode="stretch_width", margin=(0, 0, 0, 0),
+            styles={"gap": "2px"},
+        )
+
+        config_panel = pn.Column(
+            pn.pane.Markdown("### ⚙️ 图表配置", margin=(0, 0, 4, 0),
+                             styles={"font-size": "14px"}),
+            config_body,
             width=340,
             styles={"padding": "6px", "background": "#fafafa",
                     "border-radius": "6px", "border": "1px solid #e0e0e0",
@@ -1282,11 +1516,37 @@ def build_data_studio():
             margin=(0, 0, 0, 0),
         )
 
+        config_toggle_btn = pn.widgets.Button(
+            name="◀", width=24, button_type="default",
+            styles=SMALL_SELECT_STYLE, margin=(2, 0, 0, 0))
+
+        def _on_toggle_config(event):
+            config_panel.visible = not config_panel.visible
+            config_toggle_btn.name = "◀" if config_panel.visible else "▶"
+
+        config_toggle_btn.on_click(_on_toggle_config)
+
         preview_col = pn.Column(
-            pn.pane.Markdown("### 📈 实时预览", margin=(0, 0, 4, 0),
-                             styles={"font-size": "14px"}),
+            pn.Row(
+                pn.pane.Markdown("### 📈 实时预览", margin=(0, 0, 0, 0),
+                                 styles={"font-size": "14px"}),
+                preview_title_pane,
+                pn.Spacer(sizing_mode="stretch_width"),
+                view_toggle,
+                export_btn,
+                sizing_mode="stretch_width", margin=(0, 0, 4, 0),
+            ),
             preview_pane,
+            chart_table,
             sizing_mode="stretch_width", margin=(0, 0, 0, 0),
+        )
+
+        main_row = pn.Row(
+            config_toggle_btn,
+            config_panel,
+            preview_col,
+            sizing_mode="stretch_width",
+            margin=(0, 0, 0, 0),
         )
 
         dashboard_section = pn.Column(
@@ -1300,8 +1560,7 @@ def build_data_studio():
             header,
             sql_section,
             preview_accordion,
-            pn.Row(config_panel, preview_col, sizing_mode="stretch_width",
-                   margin=(0, 0, 0, 0)),
+            main_row,
             pn.layout.Divider(margin=(2, 0, 2, 0)),
             dashboard_section,
             sizing_mode="stretch_width",
