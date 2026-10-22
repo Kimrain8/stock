@@ -1,133 +1,179 @@
 # -*- coding: utf-8 -*-
 """
-腾讯 mstats 板块成分股数据获取：sign 生成 -> 请求 -> 解析 -> 名称/行情补全 的完整闭环。
+腾讯股票「成交明细」（逐笔成交）数据获取 —— gu.qq.com/sz003006/gp/detail 专用页。
+
+对应截图表格列：成交时间 / 成交价格(元) / 价格变动(元) / 成交量(手) / 成交金额(元) / 性质。
+
+接口：
+    https://stock.gtimg.cn/data/index.php?appn=detail&action=data&c=sz003006&p=0
+
+要点：
+  - 编码 GBK，返回 JS 变量：v_detail_data_sz003006=[页码, "seq/时间/价格/涨跌/量(手)/额(元)/BSM|..."]
+  - 分页：p=0 从集合竞价 09:25:00(seq0) 开始，每页约 70 条；p 越大越接近日内最新，最后一页=最新逐笔。
+  - 方向：B=买盘、S=卖盘、M=中性盘（与截图"性质"列一致）。
+  - 注意接口返回为时间正序（旧->新）；截图页是倒序展示（新->旧），代码里可 reverse。
 
 用法：
-    from fetch_plate_stocks import fetch_plate_stocks
+    from trade_detail import get_trade_detail
 
-    data, quote = fetch_plate_stocks("01801124")   # 食品加工板块
-    # data  : 接口返回的原始 JSON
-    # quote : {time, sign} 本次签名信息（如需可复现）
+    df = get_trade_detail("sz003006")                 # 取第0页（开盘->约09:33）
+    df = get_trade_detail("sz003006", page=5)        # 第5页
+    df = get_trade_detail_all("sz003006")            # 自动翻页取全量（休市后一次跑完）
 """
 
-import json
+import re
+import time
+import random
 import urllib.request
 import urllib.parse
-from mstats_sign import MStatsSigner
 
-API_URL = "https://bisheng.tenpay.com/fcgi-bin/xg_plate_stocks.fcgi"
-QT_URL = "https://qt.gtimg.cn/"
-REFERER = "https://stockapp.finance.qq.com/mstats/"
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
-
-# 页面源码中板块成分股接口的 canonical 参数顺序（决定 sign 字符串顺序，不可乱序）
-CANONICAL_ORDER = [
-    "exchange", "plate_code", "sort_type", "source", "stocks_type", "time", "user_type",
+# ----------------------------------------------------------------------------
+# 配置：动态 UA、SOCKS5 代理
+# ----------------------------------------------------------------------------
+_UA_POOL = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 ]
 
+# SOCKS5 代理：设环境变量 HTTPS_PROXY / HTTP_PROXY 即自动生效；也可在此显式指定
+#   例：SOCKS5_PROXY = "socks5h://127.0.0.1:1080"
+SOCKS5_PROXY = None
 
-def build_params(plate_code, exchange="12", sort_type="1", source="zxg",
-                 stocks_type="3", user_type="4"):
-    """构造 canonical 顺序的参数 dict（time 留空，由页面生成 sign 时就地替换）。"""
-    return {
-        "exchange": exchange,
-        "plate_code": plate_code,
-        "sort_type": sort_type,
-        "source": source,
-        "stocks_type": stocks_type,
-        "time": "",            # 占位，MStatsSigner 会用当前时间戳替换并返回真实值
-        "user_type": user_type,
-    }
+API = "https://stock.gtimg.cn/data/index.php"
+REFERER = "https://gu.qq.com/"
+
+_NATURE = {"B": "买盘", "S": "卖盘", "M": "中性盘"}
+
+# 输出 DataFrame 列结构
+COLUMNS = ["trade_time", "price", "price_change", "volume_lots", "amount_yuan", "nature"]
 
 
-def _http_get(url, headers=None):
-    req = urllib.request.Request(url, headers=headers or {"User-Agent": UA})
-    return urllib.request.urlopen(req, timeout=30).read()
+def normalize_code(code: str) -> str:
+    """sz003006/003006 归一化为带前缀代码。"""
+    code = code.strip().lower()
+    if code.startswith(("sh", "sz")):
+        return code
+    if code.isdigit() and len(code) == 6:
+        return ("sh" if code[0] in "69" else "sz") + code
+    raise ValueError("无法识别的股票代码: %r" % code)
 
 
-def fetch_plate_stocks(plate_code="01801124", signer=None):
+def _build_opener(proxy: str = None):
+    """按需挂载 SOCKS5/HTTP 代理。需 pip install pysocks（socks5 时）。"""
+    proxy_url = proxy or SOCKS5_PROXY
+    handlers = []
+    if proxy_url:
+        handlers.append(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+    return urllib.request.build_opener(*handlers)
+
+
+def _fetch_raw(code: str, page: int, proxy: str = None, retries: int = 3):
+    """拉取单页原始文本（GBK），带重试与动态 UA。"""
+    params = {"appn": "detail", "action": "data", "c": code, "p": page}
+    url = API + "?" + urllib.parse.urlencode(params)
+    opener = _build_opener(proxy)
+    last_err = None
+    for i in range(retries):
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": random.choice(_UA_POOL),
+                "Referer": REFERER,
+                "Accept": "*/*",
+            })
+            raw = opener.open(req, timeout=20).read()
+            return raw.decode("gbk", "ignore")
+        except Exception as e:
+            last_err = e
+            time.sleep(0.6 * (i + 1))  # 退避
+    raise RuntimeError("成交明细请求失败(p=%d): %s" % (page, last_err))
+
+
+def _parse(text: str):
+    """把 v_detail_data_xxx=[0,"seq/time/price/chg/vol/amount/BS|..."] 解析为 dict 列表。"""
+    m = re.search(r'=\[\d+,"?(.*?)"?\]\s*;?\s*$', text.strip())
+    if not m or not m.group(1):
+        return []
+    rows = []
+    for rec in m.group(1).split("|"):
+        f = rec.split("/")
+        if len(f) < 7:
+            continue
+        try:
+            rows.append({
+                "trade_time": f[1],                 # HH:MM:SS
+                "price": float(f[2]),               # 成交价
+                "price_change": float(f[3]),         # 价格变动
+                "volume_lots": int(f[4]),           # 成交量(手)
+                "amount_yuan": int(f[5]),           # 成交金额(元)
+                "nature": _NATURE.get(f[6], f[6]),   # 买盘/卖盘/中性盘
+            })
+        except (ValueError, IndexError):
+            continue
+    return rows
+
+
+def get_trade_detail(code: str, page: int = 0, reverse: bool = True,
+                     proxy: str = None, as_dataframe: bool = True):
     """
-    获取指定板块的成分股数据（含 sign 生成的完整流程）。
+    获取单页成交明细。
 
-    :param plate_code: 板块代码（不带 pt 前缀），如 "01801124"（食品加工）
-    :param signer:     可注入的 MStatsSigner 实例（便于复用浏览器/缓存）
-    :return: (data, quote)  data=接口原始 JSON；quote={time, sign}
+    :param code:        股票代码，如 "003006" / "sz003006"
+    :param page:        页码，0=开盘集合竞价起，越大越新；最后一页为最新逐笔
+    :param reverse:     True 时按"新->旧"倒序（与页面展示一致）
+    :param proxy:       SOCKS5/HTTP 代理，如 "socks5h://127.0.0.1:1080"
+    :param as_dataframe: True 返回 pandas.DataFrame（未装 pandas 降级为 list[dict]）
     """
-    signer = signer or MStatsSigner()
-    params = build_params(plate_code)
+    sym = normalize_code(code)
+    text = _fetch_raw(sym, page, proxy=proxy)
+    print(text)
+    rows = _parse(text)
+    if reverse:
+        rows = rows[::-1]
 
-    # 1) 生成 sign（页面上下文执行脚本；内部按 canonical 顺序，time 就地替换为新鲜值）
-    quote = signer.get_sign(params)          # -> {time, sign}
-
-    # 2) 构造请求（time/sign 与签名严格配套）
-    query = dict(params)
-    query["time"] = quote["time"]
-    query["sign"] = quote["sign"]
-    url = API_URL + "?" + urllib.parse.urlencode(query)
-
-    # 3) 请求并解析
-    body = _http_get(url, headers={"User-Agent": UA, "Referer": REFERER})
-    data = json.loads(body.decode("utf-8", "ignore"))
-
-    if data.get("retcode") != "0":
-        raise RuntimeError("接口返回失败: retcode=%s retmsg=%s" %
-                           (data.get("retcode"), data.get("retmsg")))
-
-    # 4) 用第二个行情接口补全股票名称/价格（页面本身也是这么做的）
-    enrich_names(data)
-
-    return data, quote
+    if as_dataframe:
+        try:
+            import pandas as pd
+            return pd.DataFrame(rows, columns=COLUMNS)
+        except ImportError:
+            pass
+    return rows
 
 
-def enrich_names(data):
-    """stocks_list 里的 stock_code 只是代码（如 600530.SH），名称/行情需从 qt.gtimg.cn 取。"""
-    stocks = data.get("stocks", {}).get("stocks_list", [])
-    if not stocks:
-        return
-    codes = []
-    for s in stocks:
-        code = s.get("stock_code", "")
-        if code.endswith(".SH"):
-            codes.append("sh" + code[:6])
-        elif code.endswith(".SZ"):
-            codes.append("sz" + code[:6])
-    if not codes:
-        return
-    try:
-        raw = _http_get(QT_URL + "?q=" + ",".join(codes),
-                        headers={"User-Agent": UA, "Referer": REFERER,
-                                 "Accept-Charset": "GBK,utf-8"})
-        # 接口返回 gbk 编码
-        text = raw.decode("gbk", "ignore")
-        fields = {}
-        for seg in text.strip().split(";"):
-            seg = seg.strip()
-            if "=" not in seg:
-                continue
-            key, val = seg.split("=", 1)
-            parts = val.strip("\"").split("~")
-            if len(parts) > 5:
-                k = key.strip()
-                if k.startswith("v_"):        # 去掉 "v_" 前缀，键变为 sh600530 / sz002626
-                    k = k[2:]
-                fields[k] = (parts[1], parts[3])   # (名称, 现价)
-        for s in stocks:
-            code = s.get("stock_code", "")
-            prefix = ("sh" + code[:6]) if code.endswith(".SH") else ("sz" + code[:6])
-            name, price = fields.get(prefix, ("", ""))
-            s["name"] = name
-            s["price"] = price
-    except Exception as e:  # 行情补全失败不影响已拿到的数据
-        print("警告：名称/行情补全失败，%s（成分股数据仍有效）" % e)
+def get_trade_detail_all(code: str, proxy: str = None, max_pages: int = 60,
+                         as_dataframe: bool = True):
+    """
+    自动翻页取全天成交明细（休市后一次跑完；盘中调用仅返回到当前）。
+    以"某页解析为空/无新增"为终止条件，最多翻 max_pages 页。
+    """
+    sym = normalize_code(code)
+    seen, all_rows = set(), []
+    for p in range(max_pages):
+        text = _fetch_raw(sym, p, proxy=proxy)
+        # print(text)
+        rows = _parse(text)
+        new = 0
+        for r in rows:
+            key = (r["trade_time"], r["price"], r["amount_yuan"])
+            if key not in seen:
+                seen.add(key)
+                all_rows.append(r)
+                new += 1
+        if new == 0:        # 本页无新数据，说明已到最后一页
+            break
+        time.sleep(0.15)     # 轻限速，避免触发频控
+    all_rows.sort(key=lambda x: x["trade_time"])   # 时间正序
+    if as_dataframe:
+        try:
+            import pandas as pd
+            return pd.DataFrame(all_rows, columns=COLUMNS)
+        except ImportError:
+            pass
+    return all_rows
 
 
 if __name__ == "__main__":
-    data, quote = fetch_plate_stocks("01801733") #01801124
-    print("签名信息 time=%s sign=%s" % (quote["time"], quote["sign"]))
-    print("接口 retcode=%s retmsg=%s" % (data.get("retcode"), data.get("retmsg")))
-    stat = data.get("quote_statis", {})
-    print("涨/跌/平: %s / %s / %s" % (stat.get("up_cnt"), stat.get("down_cnt"), stat.get("even_cnt")))
-    print("成分股 %d 只：" % len(data["stocks"]["stocks_list"]))
-    for s in data["stocks"]["stocks_list"]:
-        print("  %s  %s  %s" % (s.get("stock_code"), s.get("name"), s.get("price")))
+    df = get_trade_detail("sz003006", page=0) #000027（深圳能源）
+    print("=== 成交明细（p=0，页面倒序展示）===")
+    print(df.to_string(index=False) if hasattr(df, "to_string") else df)

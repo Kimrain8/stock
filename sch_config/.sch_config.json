@@ -22,7 +22,7 @@
       "name": "get_trade_calendar",
       "func": "ts:get_trade_calendar",
       "interval": "D_1",
-      "start_at": "2026-10-17 17:25:00",
+      "start_at": "2026-10-22 17:38:00",
       "validate": 1,
       "deps": [],
       "params": {}

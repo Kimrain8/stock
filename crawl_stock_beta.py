@@ -15,6 +15,7 @@ import tushare as ts
 
 import asyncio #运行异步函数需要 asyncio.run() 来执行
 from playwright.async_api import async_playwright,TimeoutError as PlaywrightTimeoutError #使用异步方式连接到已启动的chrome浏览器
+from playwright.sync_api import sync_playwright
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator #将HTML内容解析成markdown格式
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig,CacheMode
 from crawl4ai.content_filter_strategy import PruningContentFilter #配合 DefaultMarkdownGenerator 使用, 过滤掉不需要的内容
@@ -571,7 +572,12 @@ class Myqq():
     def __init__(self):
         self.db = MySQLHelper(db='jhd')
         self.trade_date = pd.Timestamp.now().date()
-        self.BASE_URL = "https://webapi.cninfo.com.cn"
+        self.max_trade_date = self.get_max_trade_date()
+        self._ENKEY_CACHE = {"fingerprint":None,"value": None, "time": 0.0}
+        self._ENKEY_TTL = 50.0
+    def get_max_trade_date(self):
+        df = self.db.qry2df(f"""select max(trade_date) as trade_date from qq_hsj AS ttd""") 
+        return pd.Timestamp.now().date() if pd.isna(df.iloc[0,0]) else pd.to_datetime(df.iloc[0,0]).date()
     def get_qq_sign(self,params, t=int(time.time() * 1000)):
         """获取行业对应的股票明细api,生成需要的动态sign值, plate_code只含数字
         引用：
@@ -591,6 +597,143 @@ class Myqq():
         s += "&key=7ad247390dafce0cf9911de0f2083eba"
         token = hashlib.md5(s.encode()).hexdigest()
         return token
+    def get_qq_sign_web(self,params, force=False,t=int(time.time() * 1000)):
+        """
+        获取接口鉴权签名 (= 页面内复刻 signForSNP 的结果)。
+        返回 {time, sign}，两者配套使用；带 50 秒本地缓存，避免频繁启动浏览器。
+
+        :param params: 除 sign 外的全部 GET 参数 (dict, 插入顺序即 sign 拼接顺序),
+                        time 键留空(页面用当前时间戳替换)，且须按页面顺序放置，
+                        例如：
+                        {"exchange":"12","plate_code":"01801124","sort_type":"1",
+                        "source":"zxg","stocks_type":"3","time":"","user_type":"4"}
+        :param force:  强制重新获取 (忽略缓存)
+        """
+        _SIGN_JS = r"""
+        (function () {
+        // 标准 MD5（与页面引入的 md5 库一致的算法，输出小写 32 位 hex）
+        function md5(str) {
+            var i, len, x, a, b, c, d, aa, bb, cc, dd,
+                S = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
+                    5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+                    4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
+                    6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21],
+                K = [0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,
+                    0xa8304613,0xfd469501,0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,
+                    0x6b901122,0xfd987193,0xa679438e,0x49b40821,0xf61e2562,0xc040b340,
+                    0x265e5a51,0xe9b6c7aa,0xd62f105d,0x02441453,0xd8a1e681,0xe7d3fbc8,
+                    0x21e1cde6,0xc33707d6,0xf4d50d87,0x455a14ed,0xa9e3e905,0xfcefa3f8,
+                    0x676f02d9,0x8d2a4c8a,0xfffa3942,0x8771f681,0x6d9d6122,0xfde5380c,
+                    0xa4beea44,0x4bdecfa9,0xf6bb4b60,0xbebfbc70,0x289b7ec6,0xeaa127fa,
+                    0xd4ef3085,0x04881d05,0xd9d4d039,0xe6db99e5,0x1fa27cf8,0xc4ac5665,
+                    0xf4292244,0x432aff97,0xab9423a7,0xfc93a039,0x655b59c3,0x8f0ccc92,
+                    0xffeff47d,0x85845dd1,0x6fa87e4f,0xfe2ce6e0,0xa3014314,0x4e0811a1,
+                    0xf7537e82,0xbd3af235,0x2ad7d2bb,0xeb86d391];
+
+            // UTF-8 字节数组
+            var bytes = [], ch, j;
+            for (j = 0; j < str.length; j++) {
+            ch = str.charCodeAt(j);
+            if (ch < 128) bytes.push(ch);
+            else if (ch < 2048) { bytes.push(0xC0 | (ch >> 6), 0x80 | (ch & 63)); }
+            else if (ch < 55296 || ch >= 57344) { bytes.push(0xE0 | (ch >> 12), 0x80 | ((ch >> 6) & 63), 0x80 | (ch & 63)); }
+            else { j++; ch = 0x10000 + (((ch & 1023) << 10) | (str.charCodeAt(j) & 1023));
+                    bytes.push(0xF0 | (ch >> 18), 0x80 | ((ch >> 12) & 63), 0x80 | ((ch >> 6) & 63), 0x80 | (ch & 63)); }
+            }
+            len = bytes.length;
+
+            // 填充并构造 16 字块（little-endian 32bit）
+            x = [];
+            for (j = 0; j < Math.ceil((len + 9) / 64) * 16; j++) x[j] = 0;
+            for (j = 0; j < len; j++) x[j >> 2] |= (bytes[j] & 255) << ((j % 4) * 8);
+            x[len >> 2] |= 0x80 << ((len % 4) * 8);
+            x[((len + 8) >> 6) * 16 + 14] = (len * 8) & 0xFFFFFFFF;
+
+            function rol(n, s) { return (n << s) | (n >>> (32 - s)); }
+
+            a = 0x67452301; b = 0xefcdab89; c = 0x98badcfe; d = 0x10325476;
+            for (i = 0; i < x.length; i += 16) {
+            aa = a; bb = b; cc = c; dd = d;
+            for (j = 0; j < 64; j++) {
+                var f, g;
+                if (j < 16)       { f = (b & c) | (~b & d);       g = j; }
+                else if (j < 32)  { f = (d & b) | (~d & c);       g = (5 * j + 1) % 16; }
+                else if (j < 48)  { f = b ^ c ^ d;                g = (3 * j + 5) % 16; }
+                else              { f = c ^ (b | ~d);             g = (7 * j) % 16; }
+                f = (f + a + K[j] + x[i + g]) | 0;
+                a = d; d = c; c = b;
+                b = (b + rol(f, S[j])) | 0;
+            }
+            a = (a + aa) | 0; b = (b + bb) | 0; c = (c + cc) | 0; d = (d + dd) | 0;
+            }
+
+            function hex(n) { // 小端序输出
+            var s = "", i;
+            for (i = 0; i < 4; i++) { s += ("0" + ((n >>> (i * 8)) & 255).toString(16)).slice(-2); }
+            return s;
+            }
+            return hex(a) + hex(b) + hex(c) + hex(d);
+        }
+
+        // 复刻页面 signForSNP：按传入"有序键值对数组"的插入序拼接，末尾补 key，取 md5 小写。
+        // 页面源码的对象顺序为 exchange,plate_code,sort_type,source,stocks_type,time,user_type，
+        // time 必须位于 user_type 之前，否则 md5 串不同、服务器校验失败。
+        // 传入的 pairs 中 key=="time" 的项由页面 Date.now() 就地替换为新鲜值，并一并返回该 time。
+        window.__genPlateSign = function (pairs) {
+            var k = [], t = null;
+            for (var i = 0; i < pairs.length; i++) {
+            var key = pairs[i][0], val = pairs[i][1];
+            if (key === "time") { t = Date.now(); val = String(t); }
+            if (key) k.push(key + "=" + val);
+            }
+            k.push("key=" + "7ad247390dafce0cf9911de0f2083eba");
+            return { time: t, sign: md5(k.join("&")).toLowerCase() };
+        };
+        return true;
+        })();
+        """
+        PLATE_PAGE = ("https://stockapp.finance.qq.com/mstats/#mod=list"
+            "&id=pt01801053&typename=%E8%B4%B5%E9%87%91%E5%B1%9E&sign=web")
+        def _fingerprint(params: dict) -> str:
+            # 只统计参与签名的"固定"字段（不含 time，time 由页面生成）
+            return "&".join(f"{k}={params[k]}" for k in params if k != "time")
+        fp = _fingerprint(params)
+        if not force:
+            c = self._ENKEY_CACHE
+            if c["fingerprint"] == fp and c["value"] and (time.time() - c["time"]) < self._ENKEY_TTL:
+                return c["value"]
+
+        launch_kwargs = {"headless": True}
+        with sync_playwright() as p:
+            browser = p.chromium.launch(**launch_kwargs)
+            try:
+
+                context = browser.new_context(
+                    user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/155.0.0.0 Safari/537.36"),
+                    viewport={"width": 1366, "height": 900},
+                )
+                page = context.new_page()
+                page.goto(PLATE_PAGE, wait_until="domcontentloaded", timeout=40000)
+                page.wait_for_timeout(3000)  # 等待页面脚本就绪
+                # 注入复刻 signForSNP 逻辑的脚本，并在页面上下文执行生成 sign。
+                # 按 params 的插入顺序构造有序键值对数组（dict 保持插入序），
+                # key=="time" 的项由页面就地替换为新鲜 Date.now()。
+                page.evaluate(_SIGN_JS)
+                pairs = [[k, v] for k, v in params.items()]  # 保持传入顺序
+                result = page.evaluate(
+                    "window.__genPlateSign(%s)" % __import__("json").dumps(pairs))
+            finally:
+                browser.close()
+
+        if not result or not result.get("sign"):
+            raise RuntimeError("生成 sign 失败：页面未成功执行 __genPlateSign")
+
+        self._ENKEY_CACHE["fingerprint"] = fp
+        self._ENKEY_CACHE["value"] = result
+        self._ENKEY_CACHE["time"] = time.time()
+        return result
     def _request(self,data_url: str, params: dict, rhead: dict,rtype:str = 'json',  
                     method: str = "GET",timeout: int = 30, proxy_pool: list = None,
                     max_retries: int = 3, retry_sleep: tuple = (2, 6)):
@@ -624,7 +767,7 @@ class Myqq():
                         if rtype == 'json':
                             return resp.json()
                         elif rtype == 'str':
-                            return resp
+                            return resp.text
                 except (ProxyError, Timeout) as e:
                     if not single_proxy and proxy:
                         bad_proxy[proxy] = bad_proxy.get(proxy, 0) + 1
@@ -644,78 +787,158 @@ class Myqq():
             time.sleep(random.uniform(*retry_sleep))
             data = _do_request()
         return data
-    def fetch_plate_stocks_df(self,plate_code_ori ):
-        """获取行业（板块）下的个股详情。直接获取sign，然后获取api数据 """
-        base_url_path = "https://bisheng.tenpay.com/fcgi-bin/xg_plate_stocks.fcgi"
-        plate_code = next(iter(re.findall(r"\d+", plate_code_ori)), None)
-        params = {
-                    "exchange": 12, #"mod": "list", 
-                    "plate_code": plate_code, #"id": plate_code_ori,
-                    "sort_type": 1, #"typename": plate_name,
-                    "source": "zxg", #"sign": 'web'
-                    "stocks_type": 3,
-                    "time": "",
-                    "user_type": 4,
-                }
-        _t = int(time.time() * 1000)
-        token = self.get_qq_sign(params=params,t=_t)
-        params.update({"sign": token,"time":_t})
-        rhead = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "Referer": "https://stockapp.finance.qq.com/",
-            }
-        api_data = self._request(data_url=base_url_path,params=params,rhead=rhead)
-        if api_data is None or api_data.get('stocks') is None:
-            api_data = {}
-        rank_list = api_data.get("stocks", {}).get("stocks_list", [])
-        df = pd.DataFrame(rank_list)
-        return df
-    def fetch_plate_stocks_db(self,df=None,plate_code_ori=None, plate_name=None,waitsecond=None):
-        """获取行业（板块）下的个股详情"""
-        def process_df(df,pcode,pname):
-            df.rename(columns={"stock_code": "ts_code","stock_name":"name","price":"zxj","change_percent":"pct_chg",
-                                "price_change":"change_amount","market_cap":"zsz",
-                                "liutong_cap":"ltsz","main_net_inflow":"zljlr","turnover_amount":"vol",
-                                "turnover_money":"amount","turnover_ratio":"hsl",
-                                "amplitude":"zf","quantity_ratio":"lb","stock_type":"market"}, inplace=True)
-            df["trade_date"] = self.trade_date #- pd.Timedelta(days=1)
-            df["symbol"] = df['ts_code'].str.extract(r'(\d+)')
-            df['tags'] = df["tags"].apply(lambda x: json.dumps(x, ensure_ascii=False))
-            df['code_qqhy'] = pcode
-            df['symbol_hy'] = df['code_qqhy'].str.extract(r'(\d+)')
-            df['name_hy'] = pname
-            return df
-        def fetch_plate_stocks_db_sub(df=None,plate_code_ori=None, plate_name=None,waitsecond=None):
-            if df is None and plate_code_ori is not None and plate_name is not None:
-                df_rst = self.fetch_plate_stocks_df(plate_code_ori)
-                df_rst = process_df(df_rst,plate_code_ori,plate_name)
-                self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail')
-                self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail_daily')
-            elif df is not None:
-                for i in range(len(df)):
-                    code = df.loc[i, 'code_qqhy']
-                    name = df.loc[i, 'name_hy']
-                    print(f"\n=== 抓取 {code} {name} ===")
-                    df_rst = self.fetch_plate_stocks_df(code)
-                    df_rst = process_df(df_rst,code,name)
-                    self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail')
-                    self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail_daily')
-                    if waitsecond is not None : time.sleep(waitsecond)
-        if df is None and plate_code_ori is None and plate_name is None:
-            df = self.db.qry2df(sql="select max(trade_date) as trade_date from qq_hy_hsj ")
-            sql = f"""select DISTINCT qhh.code_qqhy,qhh.name_hy
-            from qq_hy_hsj AS qhh where trade_date='{df.iat[0,0].strftime("%Y-%m-%d")}'
-            and not EXISTS (SELECT 1 FROM qq_hy_detail AS qhd
-            WHERE qhd.code_qqhy = qhh.code_qqhy and qhd.trade_date = '{self.trade_date.strftime("%Y-%m-%d")}')"""
-            df = self.db.qry2df(sql)
-            df = df.iloc[np.random.permutation(len(df))].reset_index(drop=True)
-        fetch_plate_stocks_db_sub(df=df,plate_code_ori=plate_code_ori,plate_name=plate_name,waitsecond=waitsecond)
-        return 0
 
+    async def get_qq_getBoardRankList(self,page, board_code = "aStock",offset: int = 0, count: int = 20):
+        """获取腾讯 hsj股票数据,使用page环境的request,直接调用api接口"""
+        base_url = "https://proxy.finance.qq.com/cgi/cgi-bin/rank/hs/getBoardRankList"
+        params = {
+            "_appver": "11.17.0",
+            "board_code": board_code,
+            "sort_type": "price",
+            "direct": "down",
+            "offset": offset,
+            "count": count,
+            "_t": int(asyncio.get_event_loop().time() * 1000)
+        }
+        url = f"{base_url}?{urlencode(params)}"
+        headers = {
+            "Referer": "https://stockapp.finance.qq.com", #page.evaluate("()=>document.referrer")
+            "Origin": "https://stockapp.finance.qq.com", #page.evaluate("() => window.origin")
+            "User-Agent": await page.evaluate("()=>navigator.userAgent")
+        }
+        resp = await page.request.get(url, headers=headers)
+        if resp.ok:
+            return await resp.json()
+        return {}
+    async def fetch_getBoardRankList_df(self,board_code = "aStock"):
+        """获取腾讯hsj股票数据,对应get_qq_getBoardRankList,先分批获取全部数据,整合到一个df中,
+        board_code: aStock, cyb,ksh"""
+        async with async_playwright() as p:
+            # browser = await p.chromium.connect_over_cdp("http://localhost:9222")
+            # context = browser.contexts[0]
+            # page = None
+            context = await p.chromium.launch_persistent_context(
+                user_data_dir="./chrome_user_data",headless=True)
+            page = await context.new_page()
+            
+            if board_code == "aStock":
+                web_url = "https://stockapp.finance.qq.com/mstats/#mod=list&id=hs_hsj&module=hs&type=hsj"
+            elif board_code == "cyb":
+                web_url = "https://stockapp.finance.qq.com/mstats/#mod=list&id=hs_cyb&module=hs&type=cyb"
+            elif board_code == "ksh":
+                web_url = "https://stockapp.finance.qq.com/mstats/#mod=list&id=hs_kcb&module=hs&type=kcb"
+            # for i in context.pages:
+            #     # i.url.split("#")[0]   # 去掉参数部分
+            #     if i.url == web_url:
+            #         page = i
+            #         break
+            # if page is None:
+            #     # raise RuntimeError("未找到目标页面，请确保已打开 https://stockapp.finance.qq.com/mstats/")
+            #     print("未找到目标页面，请确保已打开 https://stockapp.finance.qq.com/mstats/")
+            #     page = await browser.new_page()
+            #     await page.goto(web_url)
+            #     await page.wait_for_selector("div#page-navi>a#p-1", state="visible", timeout=10000)
+            await page.goto(web_url)
+            await page.wait_for_selector("div#page-navi>a#p-1", state="visible", timeout=10000)
+            
+            # 主动调用接口，offset=40 count=20，对应你的curl示例
+            api_data = await self.get_qq_getBoardRankList(page, board_code=board_code,offset=0, count=100)
+            rank_list = api_data.get("data", {}).get("rank_list", [])
+            df = pd.DataFrame(rank_list)
+            cnt = api_data.get('data').get('total')
+            cnt = cnt // 100 + (1 if cnt % 100 > 0 else 0)  # 计算总页数，每页100条
+            for i in range(1, cnt):
+                api_data = await self.get_qq_getBoardRankList(page, board_code=board_code, offset=i*100, count=100)
+                rank_list = api_data.get("data", {}).get("rank_list", [])
+                df2 = pd.DataFrame(rank_list)
+                df = pd.concat([df, df2], ignore_index=True)
+            return df
+    async def fetch_getBoardRankList_db(self):
+        """获取沪深京个股数据"""
+        df = await self.fetch_getBoardRankList_df(board_code="aStock") #获取腾讯 BoardRankList,hsj个股数据
+        df.rename(columns={"code": "qq_code","zdf":"pct_chg","zd":"change_amount",
+                            "volume":"vol","turnover":"amount","stock_type":"market"}, inplace=True)
+        df["symbol"] = df['qq_code'].str.extract(r'(\d+)')
+        df["trade_date"] = self.trade_date
+        self.db.bulkInsUpd(df,table="qq_hsj")
+        # df = await self.fetch_getBoardRankList_df(board_code="cyb") #获取腾讯 BoardRankList,创业板个股数据
+        # df.rename(columns={"code": "qq_code","zdf":"pct_chg","zd":"change_amount",
+        #                     "volume":"vol","turnover":"amount","stock_type":"market"}, inplace=True)
+        # df["symbol"] = df['qq_code'].str.extract(r'(\d+)')
+        # df["trade_date"] = self.trade_date
+        # self.db.bulkInsUpd(df,table="qq_hsj")
+        # df = await self.fetch_getBoardRankList_df(board_code="ksh") #获取腾讯 BoardRankList,科创板个股数据
+        # df.rename(columns={"code": "qq_code","zdf":"pct_chg","zd":"change_amount",
+        #                     "volume":"vol","turnover":"amount","stock_type":"market"}, inplace=True)
+        # df["symbol"] = df['qq_code'].str.extract(r'(\d+)')
+        # df["trade_date"] = self.trade_date
+        # self.db.bulkInsUpd(df,table="qq_hsj")
+    
+    async def get_qq_getRank(self,page,board_type="hy2", offset: int = 0, count: int = 20):
+        """获取腾讯 申万二级行业数据"""
+        # https://proxy.finance.qq.com/cgi/cgi-bin/rank/pt/getRank?board_type=hy2&sort_type=price&direct=down&offset=0&count=20
+        base_url = "https://proxy.finance.qq.com/cgi/cgi-bin/rank/pt/getRank"
+        params = {
+            "_appver": "11.17.0",
+            "board_type": board_type,
+            "sort_type": "price",
+            "direct": "down",
+            "offset": offset,
+            "count": count,
+            "_t": int(asyncio.get_event_loop().time() * 1000)
+        }
+        url = f"{base_url}?{urlencode(params)}"
+        headers = {
+            "Referer": "https://stockapp.finance.qq.com", #page.evaluate("()=>document.referrer")
+            "Origin": "https://stockapp.finance.qq.com", #page.evaluate("() => window.origin")
+            "User-Agent": await page.evaluate("()=>navigator.userAgent")
+        }
+        resp = await page.request.get(url, headers=headers)
+        if resp.ok:
+            return await resp.json()
+        return {}
+    async def fetch_getRank_df(self,board_type="hy2"):
+        """获取腾讯行业数据,对应get_qq_getRank,先分批获取全部数据,整合到一个df中"""
+        async with async_playwright() as p:
+            # browser = await p.chromium.connect_over_cdp("http://localhost:9222")
+            # context = browser.contexts[0]
+            # page = None
+            # for i in context.pages:
+            #     # i.url.split("#")[0]   # 去掉参数部分
+            #     if i.url == "https://stockapp.finance.qq.com/mstats/#mod=list&id=hy_second&module=hy&type=second":
+            #         page = i
+            #         break
+            context = await p.chromium.launch_persistent_context(
+                user_data_dir="./chrome_user_data",headless=True
+            )
+            page = await context.new_page()
+            await page.goto("https://stockapp.finance.qq.com/mstats/#mod=list&id=hy_second&module=hy&type=second")
+            await page.wait_for_selector("div#page-navi>a#p-1", state="visible", timeout=10000)
+
+            # 主动调用接口，offset=40 count=20，对应你的curl示例
+            api_data = await self.get_qq_getRank(page,board_type=board_type, offset=0, count=100)
+            rank_list = api_data.get("data", {}).get("rank_list", [])
+            df = pd.DataFrame(rank_list)
+            cnt = api_data.get('data').get('total')
+            cnt = cnt // 100 + (1 if cnt % 100 > 0 else 0)  # 计算总页数，每页100条
+            for i in range(1, cnt):
+                api_data = await self.get_qq_getRank(page,board_type=board_type, offset=i*100, count=100)
+                rank_list = api_data.get("data", {}).get("rank_list", [])
+                df2 = pd.DataFrame(rank_list)
+                df = pd.concat([df, df2], ignore_index=True)
+            return df
+    async def fetch_getRank_db(self):
+        """获取行业（板块）的整体变化"""
+        df = await self.fetch_getRank_df(board_type="hy2") #获取行业数据
+        df.rename(columns={"code": "code_qqhy","name":"name_hy","stock_type":"type_hy","turnover":"amount","volume":"vol","zd":"change_amount",
+                        "zdf":"pct_chg"}, inplace=True)
+        df["trade_date"] = self.trade_date #- pd.Timedelta(days=1)
+        df["symbol_hy"] = df['code_qqhy'].str.extract(r'(\d+)')
+        df['lzg'] = df["lzg"].apply(lambda x: json.dumps(x, ensure_ascii=False))
+        self.db.bulkInsUpd(df,table="qq_hy_hsj")
 
     async def fetch_xg_plate_stocks_df(self,plate_code_ori, plate_name,browser ):
-        """使用监控web中的request，获取行业（板块）下的个股详情"""
+        """获取行业（板块）下的个股详情, 使用侦听页面的方式获取。"""
         base_url_path = "https://bisheng.tenpay.com/fcgi-bin/xg_plate_stocks.fcgi"
 
         context = browser.contexts[0]
@@ -786,7 +1009,7 @@ class Myqq():
         df = pd.DataFrame(rank_list)
         return df
     async def fetch_xg_plate_stocks_db(self,df=None,plate_code_ori=None, plate_name=None,waitsecond=None):
-        """获取行业（板块）下的个股详情"""
+        """获取行业（板块）下的个股详情, 使用侦听页面的方式获取。"""
         def process_df(df,pcode,pname):
             df.rename(columns={"stock_code": "ts_code","stock_name":"name","price":"zxj","change_percent":"pct_chg",
                                 "price_change":"change_amount","market_cap":"zsz",
@@ -824,23 +1047,211 @@ class Myqq():
                     self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail')
                     self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail_daily')
                     if waitsecond is not None : time.sleep(waitsecond)
-    async def fetch_batch_plate_db(self,again=0):
-        """批量获取行业数据对应的个股明细，保存到数据库"""
-        if again == 0:
-            await self.fetch_getBoardRankList_db()
-            await self.fetch_getRank_db()
-            # 下面是两个任务并行跑
-            # task1 = self.fetch_getBoardRankList_db()
-            # task2 = self.fetch_getRank_db()
-            # await asyncio.gather(task1, task2)
-        sql = f"""'{self.trade_date.strftime("%Y-%m-%d")}'"""
-        sql = f"""select DISTINCT qhh.code_qqhy,qhh.name_hy
-        from qq_hy_hsj AS qhh where trade_date='{self.trade_date.strftime("%Y-%m-%d")}'
-        and not EXISTS (SELECT 1 FROM qq_hy_detail AS qhd
-        WHERE qhd.code_qqhy = qhh.code_qqhy and date(qhd.update_time) = qhh.trade_date)"""
-        df = self.db.qry2df(sql)
-        df = df.iloc[np.random.permutation(len(df))].reset_index(drop=True)
-        await self.fetch_xg_plate_stocks_db(df=df)
+    async def fetch_batch_plate_db(self):
+            """批量获取行业数据对应的个股明细，保存到数据库"""
+            # if again == 0:
+            #     await self.fetch_getBoardRankList_db()
+            #     await self.fetch_getRank_db()
+                # 下面是两个任务并行跑
+                # task1 = self.fetch_getBoardRankList_db()
+                # task2 = self.fetch_getRank_db()
+                # await asyncio.gather(task1, task2)
+            sql = f"""'{self.trade_date.strftime("%Y-%m-%d")}'"""
+            sql = f"""select DISTINCT qhh.code_qqhy,qhh.name_hy
+            from qq_hy_hsj AS qhh where trade_date='{self.trade_date.strftime("%Y-%m-%d")}'
+            and not EXISTS (SELECT 1 FROM qq_hy_detail AS qhd
+            WHERE qhd.code_qqhy = qhh.code_qqhy and date(qhd.update_time) = qhh.trade_date)"""
+            df = self.db.qry2df(sql)
+            df = df.iloc[np.random.permutation(len(df))].reset_index(drop=True)
+            await self.fetch_xg_plate_stocks_db(df=df)
+    def fetch_plate_stocks_df(self,plate_code_ori ):
+        """获取行业（板块）下的个股详情。直接获取sign，然后获取api数据 """
+        base_url_path = "https://bisheng.tenpay.com/fcgi-bin/xg_plate_stocks.fcgi"
+        plate_code = next(iter(re.findall(r"\d+", plate_code_ori)), None)
+        params = {
+                    "exchange": 12, #"mod": "list", 
+                    "plate_code": plate_code, #"id": plate_code_ori,
+                    "sort_type": 1, #"typename": plate_name,
+                    "source": "zxg", #"sign": 'web'
+                    "stocks_type": 3,
+                    "time": "",
+                    "user_type": 4,
+                }
+        _t = int(time.time() * 1000)
+        token = self.get_qq_sign(params=params,t=_t)
+        params.update({"sign": token,"time":_t})
+        rhead = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Referer": "https://stockapp.finance.qq.com/",
+            }
+        api_data = self._request(data_url=base_url_path,params=params,rhead=rhead)
+        if api_data is None or api_data.get('stocks') is None:
+            api_data = {}
+        rank_list = api_data.get("stocks", {}).get("stocks_list", [])
+        df = pd.DataFrame(rank_list)
+        return df
+    def fetch_plate_stocks_db(self,df=None,plate_code_ori=None, plate_name=None,waitsecond=None):
+        """获取行业（板块）下的个股详情"""
+        def process_df(df,pcode,pname):
+            df.rename(columns={"stock_code": "ts_code","stock_name":"name","price":"zxj","change_percent":"pct_chg",
+                                "price_change":"change_amount","market_cap":"zsz",
+                                "liutong_cap":"ltsz","main_net_inflow":"zljlr","turnover_amount":"vol",
+                                "turnover_money":"amount","turnover_ratio":"hsl",
+                                "amplitude":"zf","quantity_ratio":"lb","stock_type":"market"}, inplace=True)
+            df["trade_date"] = self.trade_date #- pd.Timedelta(days=1)
+            df["symbol"] = df['ts_code'].str.extract(r'(\d+)')
+            df['tags'] = df["tags"].apply(lambda x: json.dumps(x, ensure_ascii=False))
+            df['code_qqhy'] = pcode
+            df['symbol_hy'] = df['code_qqhy'].str.extract(r'(\d+)')
+            df['name_hy'] = pname
+            return df
+        def fetch_plate_stocks_db_sub(df=None,plate_code_ori=None, plate_name=None,waitsecond=None):
+            if df is None and plate_code_ori is not None and plate_name is not None:
+                df_rst = self.fetch_plate_stocks_df(plate_code_ori)
+                df_rst = process_df(df_rst,plate_code_ori,plate_name)
+                self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail')
+                self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail_daily')
+            elif df is not None:
+                for i in range(len(df)):
+                    code = df.loc[i, 'code_qqhy']
+                    name = df.loc[i, 'name_hy']
+                    print(f"\n=== 抓取 {code} {name} ===")
+                    df_rst = self.fetch_plate_stocks_df(code)
+                    df_rst = process_df(df_rst,code,name)
+                    self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail')
+                    self.db.bulkInsUpd(df=df_rst,table='qq_hy_detail_daily')
+                    if waitsecond is not None : time.sleep(waitsecond)
+        if df is None and plate_code_ori is None and plate_name is None:
+            df = self.db.qry2df(sql="select max(trade_date) as trade_date from qq_hy_hsj ")
+            sql = f"""select DISTINCT qhh.code_qqhy,qhh.name_hy
+            from qq_hy_hsj AS qhh where trade_date='{df.iat[0,0].strftime("%Y-%m-%d")}'
+            and not EXISTS (SELECT 1 FROM qq_hy_detail AS qhd
+            WHERE qhd.code_qqhy = qhh.code_qqhy and qhd.trade_date = '{self.trade_date.strftime("%Y-%m-%d")}')"""
+            df = self.db.qry2df(sql)
+            df = df.iloc[np.random.permutation(len(df))].reset_index(drop=True)
+        fetch_plate_stocks_db_sub(df=df,plate_code_ori=plate_code_ori,plate_name=plate_name,waitsecond=waitsecond)
+        return 0
+    def get_time_kline_df(self,qq_code ):
+        """获取 分时K线数据, 只能输入单个qqcode(sh688808) """
+        base_url_path = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/minute/query"
+        params = {"_var": "min_data", "code": qq_code}
+        # _t = int(time.time() * 1000)
+        # token = self.get_qq_sign(params=params,t=_t)
+        # params.update({"sign": token,"time":_t})
+        rhead = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+                # "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Referer": "https://gu.qq.com/",
+            }
+        api_data = self._request(data_url=base_url_path,params=params,rhead=rhead,rtype="str")
+        
+        if api_data.lstrip().startswith("min_data="):
+            api_data = api_data.split("=", 1)[1].strip()
+        api_data = json.loads(api_data)
+        if api_data.get("code") != 0:
+            raise RuntimeError("接口错误: code=%s msg=%s" % (api_data.get("code"), api_data.get("msg")))
+        
+        dd = api_data["data"][qq_code]["data"] #['sh688808']
+        rows = []
+        for line in dd.get("data", []):
+            # "HHMM 价格 成交量(手) 成交额(元)"
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            rows.append({
+                "trade_date": parts[0],        # HHMM
+                "zxj": float(parts[1]),
+                "vol": int(parts[2]),       # 手
+                "amount": float(parts[3]),     # 元
+            })
+        df = pd.DataFrame(rows)
+        df["trade_date"] = pd.to_datetime(pd.Timestamp.now().strftime('%Y%m%d ') + df['trade_date'],format='%Y%m%d %H%M')
+        df["qq_code"] = qq_code
+        df["symbol"] = df["qq_code"].str.extract(r'(\d+)')
+        self.db.bulkInsUpd(df=df,table='qq_time_kline')
+        
+        return 0
+    def get_time_detail_df(self,qq_code ,max_page=99):
+        """获取 成交明细数据, 只能输入单个qqcode(sz003006) 
+        max_page最大只能是60，如果是99 表示取最后一页，100表示取全部
+        """
+        def _parse(text: str):
+            """把 v_detail_data_xxx=[0,"seq/time/price/chg/vol/amount/BS|..."] 解析为 dict 列表。"""
+            m = re.search(r'=\[\d+,"?(.*?)"?\]\s*;?\s*$', text.strip())
+            if not m or not m.group(1):
+                return []
+            rows = []
+            for rec in m.group(1).split("|"):
+                f = rec.split("/")
+                if len(f) < 7:
+                    continue
+                try:
+                    rows.append({
+                        "trade_date": f[1],                 # HH:MM:SS
+                        "zxj": float(f[2]),               # 成交价
+                        "change_amount": float(f[3]),         # 价格变动
+                        "vol": int(f[4]),           # 成交量(手)
+                        "amount": int(f[5]),           # 成交金额(元)
+                        "nature": f[6],   # 买盘/卖盘/中性盘
+                    })
+                except (ValueError, IndexError):
+                    continue
+            return rows
+        base_url_path = "https://stock.gtimg.cn/data/index.php"
+        rhead = {
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+                            # "Accept": "application/json, text/javascript, */*; q=0.01",
+                            "Accept": "*/*",
+                            "Referer": "https://gu.qq.com/",
+                        }
+        COLUMNS = ["trade_date", "zxj", "change_amount", "vol", "amount", "nature"]
+
+
+        if max_page >= 99:
+            params = {"appn": "detail", "action": "timeline", "c": qq_code}
+            api_data = self._request(data_url=base_url_path,params=params,rhead=rhead,rtype="str")
+            m = re.search(r'=\[\d+,"?(.*?)"?\]\s*;?\s*$', api_data.strip())
+            if not m or not m.group(1):
+                rows=[]
+            else:
+                rows = m.group(1).split("|")
+        
+        if max_page == 100 and len(rows) >=1:
+            all_rows = []
+            for p in range(len(rows)):
+                params = {"appn": "detail", "action": "data", "c": qq_code, "p": p}
+                text = self._request(data_url=base_url_path,params=params,rhead=rhead,rtype="str")
+                rows = _parse(text)
+                all_rows.extend(rows)
+                time.sleep(random.random()/2+0.3)     # 轻限速，避免触发频控
+
+            try:
+                df = pd.DataFrame(all_rows, columns=COLUMNS)
+                df["qq_code"] = qq_code
+                df["symbol"] = df["qq_code"].str.extract(r'(\d+)')
+                df["trade_date"] = pd.to_datetime(pd.Timestamp.now().strftime('%Y%m%d ') + df['trade_date'],format='%Y%m%d %H:%M:%S')
+                self.db.bulkInsUpd(df=df,table='qq_time_detail')
+                return 0
+            except Exception as e:
+                raise e
+        else:
+            if max_page == 99:
+                max_page = len(rows) -1
+            params = {"appn": "detail", "action": "data", "c": qq_code, "p": max_page}
+            text = self._request(data_url=base_url_path,params=params,rhead=rhead,rtype="str")
+            all_rows = _parse(text)
+            try:
+                df = pd.DataFrame(all_rows, columns=COLUMNS)
+                df["qq_code"] = qq_code
+                df["symbol"] = df["qq_code"].str.extract(r'(\d+)')
+                df["trade_date"] = pd.to_datetime(pd.Timestamp.now().strftime('%Y%m%d ') + df['trade_date'],format='%Y%m%d %H:%M:%S')
+                self.db.bulkInsUpd(df=df,table='qq_time_detail')
+                return 0
+            except Exception as e:
+                raise e
+        return -1
+        
 
     def get_qq_quotes_df(self,codes):
         """
@@ -856,11 +1267,11 @@ class Myqq():
             'price_buy1','vol_buy1','price_buy2','vol_buy2','price_buy3','vol_buy3','price_buy4','vol_buy4','price_buy5','vol_buy5',
             'price_sel1','vol_sel1','price_sel2','vol_sel2','price_sel3','vol_sel3','price_sel4','vol_sel4','price_sel5','vol_sel5',
             'reserve1','price_time','change_amount','pct_chg','high','low','zxjle','vol_repeat','amount','hsl','pe_ttm',
-            'reserve2','high_repeat','low_repeat','zf','ltsz','zsz','pn','ztj','dtj','lb','weicha',
-            'price_avg','pe_dyna','pe_static','reserve3','reserve4','unknown5','amount_repeat','amount_fixed','vol_fixed','stock_stus_auth','market',
-            'upps','zdf_d5','ttm','roe_ttm','unknown10','high_1y','low_1y','zdf_d10','zdf_d20','zdf_d60','ltgb',
-            'zgben','weibi','reserve5','ltgb_repeat','reserve7','reserve8','reserve9','reserve10','reserve11','curr_type','unknown16','trade_stus',
-            'price_ah','unknown18','unknown19']
+            'reserve2','high_repeat','low_repeat','zf','ltsz','zsz','pn','ztj','dtj','lb','weicha','price_avg',
+            'pe_dyna','pe_static','reserve3','reserve4','unknown5','amount_repeat','amount_fixed','vol_fixed','stock_stus_auth',
+            'market','zdf_y','zdf_d5','ttm','roe_ttm','unknown10','high_1y','low_1y','zdf_d10','zdf_d20','zdf_d60','ltgb',
+            'zgben','weibi','reserve5','ltgb_repeat','reserve7','reserve8','zdf_w52','reserve10','reserve11','curr_type',
+            'unknown16','trade_stus','price_ah','unknown18','unknown19']
 
         # 检查是否正好 88 个字段,若不够则补足（但实际已有88个,但为了严谨可检查）
         if len(field_names) != 88:
@@ -905,7 +1316,7 @@ class Myqq():
         # 构建 DataFrame
         df = pd.DataFrame(rows, columns=field_names)
         return df
-    def fetch_quotes_db(self,codes=None):
+    def fetch_quotes_db(self,codes=None,tbl='qq_qt'):
         """codes :list类型, 是qqcode的格式: sz000408"""
         if codes is None:
             sql = f"""select distinct qh.qq_code from qq_hsj AS qh
@@ -925,18 +1336,44 @@ class Myqq():
                     df = df.replace(["",r"^\s*$"],None,regex=True)
                     df['trade_date'] = self.trade_date
                     df['qq_code']=codes
-                    self.db.bulkInsUpd(table='qq_qt',df=df)
+                    self.db.bulkInsUpd(table=tbl,df=df)
         else:
             df = self.get_qq_quotes_df(codes=codes)
             if len(df) >= 1:
                 df = df.replace(["",r"^\s*$"],None,regex=True)
                 df['trade_date'] = self.trade_date
                 df['qq_code']=codes
-                self.db.bulkInsUpd(table='qq_qt',df=df)
-    @staticmethod
-    def get_qq_gudong(df = None, qq_code = None):
+                self.db.bulkInsUpd(table=tbl,df=df)
+    def fetch_quotes_db_tmp(self,codes=None,tbl='qq_qt_detail_tmp'):
+            """codes :list类型, 是qqcode的格式: sz000408"""
+            if codes is None:
+                sql = ("select distinct qh.qq_code from qq_hsj AS qh "
+                        "where qh.trade_date  = (select max(b.trade_date) from qq_hsj as b)")
+                df2 = self.db.qry2df(sql=sql)
+                df2 = df2.iloc[np.random.permutation(len(df2))].reset_index(drop=True)
+                while len(df2)>=1:
+                    if len(df2) <= 100 : 
+                        codes = df2['qq_code'].to_list()
+                        df2 = pd.DataFrame(columns=df2.columns)
+                    else:
+                        codes = df2.loc[0:99,'qq_code'].to_list()
+                        df2 = df2.loc[100:,:].reset_index(drop=True)
+                    df = self.get_qq_quotes_df(codes=codes)
+                    if len(df) >= 1:
+                        df = df.replace(["",r"^\s*$"],None,regex=True)
+                        df['trade_date'] = self.trade_date
+                        df['qq_code']=codes
+                        self.db.bulkInsUpd(table=tbl,df=df)
+            else:
+                df = self.get_qq_quotes_df(codes=codes)
+                if len(df) >= 1:
+                    df = df.replace(["",r"^\s*$"],None,regex=True)
+                    df['trade_date'] = self.trade_date
+                    df['qq_code']=codes
+                    self.db.bulkInsUpd(table=tbl,df=df)
+    def get_qq_gudong(self,df = None, qq_code = None,init=0):
         """
-        获取腾讯财经流通股东数据, 返回结构化DataFrame
+        获取腾讯财经流通股东数据, 返回结构化DataFrame, 同步模式
         :param df: DataFrame, 可选, 必须包含列 qq_code, 批量抓取
         :param qq_code: str, 可选, 单股票代码, 例如 sz301206
         :return: pd.DataFrame, 字段对齐mysql表：dt,pdt,trade_date,qq_code,bdms,cgsl,gddm,gdmc,gfxz,ltbl,sqcgsl
@@ -958,11 +1395,16 @@ class Myqq():
             }
             # url = f"{base_url}?{urlencode(params)}"
             # resp = await page.request.get(url, headers=headers)
-            resp = requests.get(base_url, params=params, headers=headers, timeout=10)
             df = pd.DataFrame(columns=cols)
+            try:
+                resp = requests.get(base_url, params=params, headers=headers, timeout=10)
+            except Exception as e:
+                print("request:{qq_code}出错")
+                return df
             if resp.ok:
                 match = pattern.search(resp.text)
                 if not match:
+                    print(f"not match:{qq_code}")
                     return df
                 else:
                     resp = match.group(1)
@@ -973,19 +1415,50 @@ class Myqq():
                             df2 = pd.DataFrame(resp[i]['rows'])
                             df2['dt'] = resp[i]['dt']
                             df2['pdt'] = resp[i]['pdt']
-                            df2['trade_date'] = pd.Timestamp.now().date()
+                            df2['trade_date'] = self.trade_date #pd.Timestamp.now().date()
                             df2['qq_code'] = qq_code
-                            df = pd.concat([df, df2], ignore_index=True)
+                            df = pd.concat((df,df2),ignore_index=True)
                         return df
-                    except json.JSONDecodeError as e:
+                    except Exception as e:
+                        print(qq_code,resp)
                         return df
+            else:
+                print(qq_code,resp)
+                return df
+
         if df is not None and len(df)>=1 and qq_code is None :
             df_rst = _get_one(df.loc[0,'qq_code'])
             for i in range(1,len(df)):
                 df_rst = pd.concat((df_rst,_get_one(df.loc[i,'qq_code'])),ignore_index=True)
+            df_rst.replace({"--":None},inplace=True)
+            if len(df_rst)>=1 :
+                self.db.bulkInsUpd(df=df_rst,table='qq_hsj_gd')
         elif qq_code is not None and df is None:
             df_rst = _get_one(qq_code)
-        return df_rst
+            df_rst.replace({"--":None},inplace=True)
+            if len(df_rst)>=1 :
+                self.db.bulkInsUpd(df=df_rst,table='qq_hsj_gd')
+        elif df is None and qq_code is None and init == 1:
+            max_date_str = self.max_trade_date.strftime('%Y-%m-%d')
+            date_str = self.trade_date.strftime('%Y-%m-%d')
+            sql = (f"select qh.qq_code from qq_hsj qh where qh.trade_date = '{max_date_str}' "
+                   f"and not EXISTS (SELECT 1 FROM qq_hsj_gd qhg "
+                   f"WHERE qhg.qq_code = qh.qq_code "
+                   f"and qhg.trade_date = '{date_str}') ")
+            df = self.db.qry2df(sql=sql)
+            print(len(df))
+            df = df.iloc[np.random.permutation(len(df))].reset_index(drop=True)
+            for i in range(1,len(df)):
+                try:
+                    df_one = _get_one(df.loc[i,'qq_code'])
+                    df_one.replace({"--":None},inplace=True)
+                    if len(df_one)>=1 :
+                        self.db.bulkInsUpd(df=df_one,table='qq_hsj_gd')
+                except Exception as e:
+                    df_one.to_pickle('error.pkl')
+                    print(e)
+                    return -1
+        return 0
     async def fetch_qt_web(self,qq_code = "sh688041"):
             """获取整个html的数据"""
             async with async_playwright() as p:
@@ -1145,8 +1618,10 @@ if __name__ == "__main__":
     # qq.fetch_quotes_db(codes=None)
     # df = qq.fetch_plate_stocks_df(plate_code_ori="pt01801124") #pt01801111
     # df = qq.fetch_plate_stocks_df(plate_code_ori="pt01801111") #pt01801111
-    df = pd.DataFrame({"code_qqhy":['pt01801082','pt01801111'],"name_hy":['其他电子Ⅱ','白色家电']})
-    qq.fetch_plate_stocks_db()
+    # df = pd.DataFrame({"code_qqhy":['pt01801082','pt01801111'],"name_hy":['其他电子Ⅱ','白色家电']})
+    # qq.fetch_plate_stocks_db()
+    # df = qq.get_time_kline_df("sz003006")
+    df = qq.get_time_detail_df("sz003006")
 
 
     embed()  # 进入交互式调试环境，方便你手动操作浏览器

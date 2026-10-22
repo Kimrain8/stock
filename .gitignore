@@ -9,6 +9,7 @@ logs/
 outputs/
 reports/
 tushare_profile/
+uploads/
 .panel/
 .env
 *.log

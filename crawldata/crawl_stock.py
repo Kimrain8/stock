@@ -35,7 +35,7 @@ class Myqq():
         self.db = MySQLHelper(db='jhd')
         self.trade_date = pd.Timestamp.now().date()
         self.max_trade_date = self.get_max_trade_date()
-        self._ENKEY_CACHE = {"value": None, "time": 0.0}
+        self._ENKEY_CACHE = {"fingerprint":None,"value": None, "time": 0.0}
         self._ENKEY_TTL = 50.0
     def get_max_trade_date(self):
         df = self.db.qry2df(f"""select max(trade_date) as trade_date from qq_hsj AS ttd""") 
@@ -59,6 +59,143 @@ class Myqq():
         s += "&key=7ad247390dafce0cf9911de0f2083eba"
         token = hashlib.md5(s.encode()).hexdigest()
         return token
+    def get_qq_sign_web(self,params, force=False,t=int(time.time() * 1000)):
+        """
+        获取接口鉴权签名 (= 页面内复刻 signForSNP 的结果)。
+        返回 {time, sign}，两者配套使用；带 50 秒本地缓存，避免频繁启动浏览器。
+
+        :param params: 除 sign 外的全部 GET 参数 (dict, 插入顺序即 sign 拼接顺序),
+                        time 键留空(页面用当前时间戳替换)，且须按页面顺序放置，
+                        例如：
+                        {"exchange":"12","plate_code":"01801124","sort_type":"1",
+                        "source":"zxg","stocks_type":"3","time":"","user_type":"4"}
+        :param force:  强制重新获取 (忽略缓存)
+        """
+        _SIGN_JS = r"""
+        (function () {
+        // 标准 MD5（与页面引入的 md5 库一致的算法，输出小写 32 位 hex）
+        function md5(str) {
+            var i, len, x, a, b, c, d, aa, bb, cc, dd,
+                S = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
+                    5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+                    4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
+                    6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21],
+                K = [0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,
+                    0xa8304613,0xfd469501,0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,
+                    0x6b901122,0xfd987193,0xa679438e,0x49b40821,0xf61e2562,0xc040b340,
+                    0x265e5a51,0xe9b6c7aa,0xd62f105d,0x02441453,0xd8a1e681,0xe7d3fbc8,
+                    0x21e1cde6,0xc33707d6,0xf4d50d87,0x455a14ed,0xa9e3e905,0xfcefa3f8,
+                    0x676f02d9,0x8d2a4c8a,0xfffa3942,0x8771f681,0x6d9d6122,0xfde5380c,
+                    0xa4beea44,0x4bdecfa9,0xf6bb4b60,0xbebfbc70,0x289b7ec6,0xeaa127fa,
+                    0xd4ef3085,0x04881d05,0xd9d4d039,0xe6db99e5,0x1fa27cf8,0xc4ac5665,
+                    0xf4292244,0x432aff97,0xab9423a7,0xfc93a039,0x655b59c3,0x8f0ccc92,
+                    0xffeff47d,0x85845dd1,0x6fa87e4f,0xfe2ce6e0,0xa3014314,0x4e0811a1,
+                    0xf7537e82,0xbd3af235,0x2ad7d2bb,0xeb86d391];
+
+            // UTF-8 字节数组
+            var bytes = [], ch, j;
+            for (j = 0; j < str.length; j++) {
+            ch = str.charCodeAt(j);
+            if (ch < 128) bytes.push(ch);
+            else if (ch < 2048) { bytes.push(0xC0 | (ch >> 6), 0x80 | (ch & 63)); }
+            else if (ch < 55296 || ch >= 57344) { bytes.push(0xE0 | (ch >> 12), 0x80 | ((ch >> 6) & 63), 0x80 | (ch & 63)); }
+            else { j++; ch = 0x10000 + (((ch & 1023) << 10) | (str.charCodeAt(j) & 1023));
+                    bytes.push(0xF0 | (ch >> 18), 0x80 | ((ch >> 12) & 63), 0x80 | ((ch >> 6) & 63), 0x80 | (ch & 63)); }
+            }
+            len = bytes.length;
+
+            // 填充并构造 16 字块（little-endian 32bit）
+            x = [];
+            for (j = 0; j < Math.ceil((len + 9) / 64) * 16; j++) x[j] = 0;
+            for (j = 0; j < len; j++) x[j >> 2] |= (bytes[j] & 255) << ((j % 4) * 8);
+            x[len >> 2] |= 0x80 << ((len % 4) * 8);
+            x[((len + 8) >> 6) * 16 + 14] = (len * 8) & 0xFFFFFFFF;
+
+            function rol(n, s) { return (n << s) | (n >>> (32 - s)); }
+
+            a = 0x67452301; b = 0xefcdab89; c = 0x98badcfe; d = 0x10325476;
+            for (i = 0; i < x.length; i += 16) {
+            aa = a; bb = b; cc = c; dd = d;
+            for (j = 0; j < 64; j++) {
+                var f, g;
+                if (j < 16)       { f = (b & c) | (~b & d);       g = j; }
+                else if (j < 32)  { f = (d & b) | (~d & c);       g = (5 * j + 1) % 16; }
+                else if (j < 48)  { f = b ^ c ^ d;                g = (3 * j + 5) % 16; }
+                else              { f = c ^ (b | ~d);             g = (7 * j) % 16; }
+                f = (f + a + K[j] + x[i + g]) | 0;
+                a = d; d = c; c = b;
+                b = (b + rol(f, S[j])) | 0;
+            }
+            a = (a + aa) | 0; b = (b + bb) | 0; c = (c + cc) | 0; d = (d + dd) | 0;
+            }
+
+            function hex(n) { // 小端序输出
+            var s = "", i;
+            for (i = 0; i < 4; i++) { s += ("0" + ((n >>> (i * 8)) & 255).toString(16)).slice(-2); }
+            return s;
+            }
+            return hex(a) + hex(b) + hex(c) + hex(d);
+        }
+
+        // 复刻页面 signForSNP：按传入"有序键值对数组"的插入序拼接，末尾补 key，取 md5 小写。
+        // 页面源码的对象顺序为 exchange,plate_code,sort_type,source,stocks_type,time,user_type，
+        // time 必须位于 user_type 之前，否则 md5 串不同、服务器校验失败。
+        // 传入的 pairs 中 key=="time" 的项由页面 Date.now() 就地替换为新鲜值，并一并返回该 time。
+        window.__genPlateSign = function (pairs) {
+            var k = [], t = null;
+            for (var i = 0; i < pairs.length; i++) {
+            var key = pairs[i][0], val = pairs[i][1];
+            if (key === "time") { t = Date.now(); val = String(t); }
+            if (key) k.push(key + "=" + val);
+            }
+            k.push("key=" + "7ad247390dafce0cf9911de0f2083eba");
+            return { time: t, sign: md5(k.join("&")).toLowerCase() };
+        };
+        return true;
+        })();
+        """
+        PLATE_PAGE = ("https://stockapp.finance.qq.com/mstats/#mod=list"
+            "&id=pt01801053&typename=%E8%B4%B5%E9%87%91%E5%B1%9E&sign=web")
+        def _fingerprint(params: dict) -> str:
+            # 只统计参与签名的"固定"字段（不含 time，time 由页面生成）
+            return "&".join(f"{k}={params[k]}" for k in params if k != "time")
+        fp = _fingerprint(params)
+        if not force:
+            c = self._ENKEY_CACHE
+            if c["fingerprint"] == fp and c["value"] and (time.time() - c["time"]) < self._ENKEY_TTL:
+                return c["value"]
+
+        launch_kwargs = {"headless": True}
+        with sync_playwright() as p:
+            browser = p.chromium.launch(**launch_kwargs)
+            try:
+
+                context = browser.new_context(
+                    user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/155.0.0.0 Safari/537.36"),
+                    viewport={"width": 1366, "height": 900},
+                )
+                page = context.new_page()
+                page.goto(PLATE_PAGE, wait_until="domcontentloaded", timeout=40000)
+                page.wait_for_timeout(3000)  # 等待页面脚本就绪
+                # 注入复刻 signForSNP 逻辑的脚本，并在页面上下文执行生成 sign。
+                # 按 params 的插入顺序构造有序键值对数组（dict 保持插入序），
+                # key=="time" 的项由页面就地替换为新鲜 Date.now()。
+                page.evaluate(_SIGN_JS)
+                pairs = [[k, v] for k, v in params.items()]  # 保持传入顺序
+                result = page.evaluate(
+                    "window.__genPlateSign(%s)" % __import__("json").dumps(pairs))
+            finally:
+                browser.close()
+
+        if not result or not result.get("sign"):
+            raise RuntimeError("生成 sign 失败：页面未成功执行 __genPlateSign")
+
+        self._ENKEY_CACHE["fingerprint"] = fp
+        self._ENKEY_CACHE["value"] = result
+        self._ENKEY_CACHE["time"] = time.time()
+        return result
     def _request(self,data_url: str, params: dict, rhead: dict,rtype:str = 'json',  
                     method: str = "GET",timeout: int = 30, proxy_pool: list = None,
                     max_retries: int = 3, retry_sleep: tuple = (2, 6)):
@@ -92,7 +229,7 @@ class Myqq():
                         if rtype == 'json':
                             return resp.json()
                         elif rtype == 'str':
-                            return resp
+                            return resp.text
                 except (ProxyError, Timeout) as e:
                     if not single_proxy and proxy:
                         bad_proxy[proxy] = bad_proxy.get(proxy, 0) + 1
@@ -457,7 +594,125 @@ class Myqq():
             df = df.iloc[np.random.permutation(len(df))].reset_index(drop=True)
         fetch_plate_stocks_db_sub(df=df,plate_code_ori=plate_code_ori,plate_name=plate_name,waitsecond=waitsecond)
         return 0
+    def get_time_kline_df(self,qq_code ):
+        """获取 分时K线数据, 只能输入单个qqcode(sh688808) """
+        base_url_path = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/minute/query"
+        params = {"_var": "min_data", "code": qq_code}
+        # _t = int(time.time() * 1000)
+        # token = self.get_qq_sign(params=params,t=_t)
+        # params.update({"sign": token,"time":_t})
+        rhead = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+                # "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Referer": "https://gu.qq.com/",
+            }
+        api_data = self._request(data_url=base_url_path,params=params,rhead=rhead,rtype="str")
+        
+        if api_data.lstrip().startswith("min_data="):
+            api_data = api_data.split("=", 1)[1].strip()
+        api_data = json.loads(api_data)
+        if api_data.get("code") != 0:
+            raise RuntimeError("接口错误: code=%s msg=%s" % (api_data.get("code"), api_data.get("msg")))
+        
+        dd = api_data["data"][qq_code]["data"] #['sh688808']
+        rows = []
+        for line in dd.get("data", []):
+            # "HHMM 价格 成交量(手) 成交额(元)"
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            rows.append({
+                "trade_date": parts[0],        # HHMM
+                "zxj": float(parts[1]),
+                "vol": int(parts[2]),       # 手
+                "amount": float(parts[3]),     # 元
+            })
+        df = pd.DataFrame(rows)
+        df["trade_date"] = pd.to_datetime(pd.Timestamp.now().strftime('%Y%m%d ') + df['trade_date'],format='%Y%m%d %H%M')
+        df["qq_code"] = qq_code
+        df["symbol"] = df["qq_code"].str.extract(r'(\d+)')
+        self.db.bulkInsUpd(df=df,table='qq_time_kline')
+        
+        return 0
+    def get_time_detail_df(self,qq_code ,max_page=99):
+        """获取 成交明细数据, 只能输入单个qqcode(sz003006) 
+        max_page最大只能是60，如果是99 表示取最后一页，100表示取全部
+        """
+        def _parse(text: str):
+            """把 v_detail_data_xxx=[0,"seq/time/price/chg/vol/amount/BS|..."] 解析为 dict 列表。"""
+            m = re.search(r'=\[\d+,"?(.*?)"?\]\s*;?\s*$', text.strip())
+            if not m or not m.group(1):
+                return []
+            rows = []
+            for rec in m.group(1).split("|"):
+                f = rec.split("/")
+                if len(f) < 7:
+                    continue
+                try:
+                    rows.append({
+                        "trade_date": f[1],                 # HH:MM:SS
+                        "zxj": float(f[2]),               # 成交价
+                        "change_amount": float(f[3]),         # 价格变动
+                        "vol": int(f[4]),           # 成交量(手)
+                        "amount": int(f[5]),           # 成交金额(元)
+                        "nature": f[6],   # 买盘/卖盘/中性盘
+                    })
+                except (ValueError, IndexError):
+                    continue
+            return rows
+        base_url_path = "https://stock.gtimg.cn/data/index.php"
+        rhead = {
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+                            # "Accept": "application/json, text/javascript, */*; q=0.01",
+                            "Accept": "*/*",
+                            "Referer": "https://gu.qq.com/",
+                        }
+        COLUMNS = ["trade_date", "zxj", "change_amount", "vol", "amount", "nature"]
 
+
+        if max_page >= 99:
+            params = {"appn": "detail", "action": "timeline", "c": qq_code}
+            api_data = self._request(data_url=base_url_path,params=params,rhead=rhead,rtype="str")
+            m = re.search(r'=\[\d+,"?(.*?)"?\]\s*;?\s*$', api_data.strip())
+            if not m or not m.group(1):
+                rows=[]
+            else:
+                rows = m.group(1).split("|")
+        
+        if max_page == 100 and len(rows) >=1:
+            all_rows = []
+            for p in range(len(rows)):
+                params = {"appn": "detail", "action": "data", "c": qq_code, "p": p}
+                text = self._request(data_url=base_url_path,params=params,rhead=rhead,rtype="str")
+                rows = _parse(text)
+                all_rows.extend(rows)
+                time.sleep(random.random()/2+0.3)     # 轻限速，避免触发频控
+
+            try:
+                df = pd.DataFrame(all_rows, columns=COLUMNS)
+                df["qq_code"] = qq_code
+                df["symbol"] = df["qq_code"].str.extract(r'(\d+)')
+                df["trade_date"] = pd.to_datetime(pd.Timestamp.now().strftime('%Y%m%d ') + df['trade_date'],format='%Y%m%d %H:%M:%S')
+                self.db.bulkInsUpd(df=df,table='qq_time_detail')
+                return 0
+            except Exception as e:
+                raise e
+        else:
+            if max_page == 99:
+                max_page = len(rows) -1
+            params = {"appn": "detail", "action": "data", "c": qq_code, "p": max_page}
+            text = self._request(data_url=base_url_path,params=params,rhead=rhead,rtype="str")
+            all_rows = _parse(text)
+            try:
+                df = pd.DataFrame(all_rows, columns=COLUMNS)
+                df["qq_code"] = qq_code
+                df["symbol"] = df["qq_code"].str.extract(r'(\d+)')
+                df["trade_date"] = pd.to_datetime(pd.Timestamp.now().strftime('%Y%m%d ') + df['trade_date'],format='%Y%m%d %H:%M:%S')
+                self.db.bulkInsUpd(df=df,table='qq_time_detail')
+                return 0
+            except Exception as e:
+                raise e
+        return -1
     
     def get_qq_quotes_df(self,codes):
         """
@@ -893,19 +1148,27 @@ if __name__ == "__main__":
     # ts.get_trade_calendar() #获取交易日历
     # ts.get_stock_list()     #获取A股清单
     # ts.get_daily_deal()     #获取日交易数据
-    
     qq = Myqq()
     # asyncio.run(qq.fetch_getBoardRankList_db())
     # asyncio.run(qq.fetch_getRank_db())
     # df = asyncio.run(qq.fetch_xg_plate_stocks_db(plate_code_ori="pt01801111",plate_name="白色家电"))
     # df = asyncio.run(qq.fetch_xg_plate_stocks_db(plate_code_ori="pt01801124",plate_name="食品加工"))
-    df = pd.DataFrame({"code_qqhy":['pt01801082','pt01801111'],"name_hy":['其他电子Ⅱ','白色家电']})
-    qq.fetch_plate_stocks_db(df=df)
     # df = qq.fetch_plate_stocks_df(plate_code_ori='pt01801082')
     # asyncio.run(qq.fetch_batch_plate_db())
     # qq.fetch_quotes_db(codes=None) #获取qq_qt数据
     # rst = qq.get_qq_gudong(qq_code='sz001232') #
     # print(rst)
+    # params = {
+    #     "exchange": "12",
+    #     "plate_code": "01801111",
+    #     "sort_type": "1",
+    #     "source": "zxg",
+    #     "stocks_type": "3",
+    #     "time": "",            # 占位，MStatsSigner 会用当前时间戳替换并返回真实值
+    #     "user_type": "4",
+    # }
+    # t = qq.get_qq_sign_web(params=params)
+    # t2 = qq.get_qq_sign(params=params,t=t["time"])
 
     embed()  # 进入交互式调试环境，方便你手动操作浏览器
 
