@@ -241,7 +241,7 @@ async def list_permissions(request: Request):
     db = MySQLHelper(db=settings.DB_NAME)
     df = db.qry2df(
         "SELECT id, subject_type, subject, resource, resource_type, "
-        "action, priority, is_active, description, updated_at "
+        "action, priority, is_active, description, update_time "
         "FROM permissions ORDER BY subject_type, subject, priority"
     )
     return df.to_dict(orient="records")

@@ -1169,7 +1169,7 @@ if __name__ == "__main__":
     # }
     # t = qq.get_qq_sign_web(params=params)
     # t2 = qq.get_qq_sign(params=params,t=t["time"])
-
+    df = qq.get_time_detail_df("sz003006",max_page=100)
     embed()  # 进入交互式调试环境，方便你手动操作浏览器
 
 
